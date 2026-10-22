@@ -264,6 +264,12 @@ jobs:
           grep -R -n -E 'SDL_Renderer|Renderer|SDL_Window.*Window' ../src ../include
           echo "=== Emscripten window creation ==="
           sed -n '600,645p' ../src/CIrrDeviceSDL.cpp
+
+          echo "=== SDL renderer declaration ==="
+          grep -n -B 25 -A 15 'SDL_CreateWindowAndRenderer' ../src/CIrrDeviceSDL.cpp
+          echo "=== Renderer declarations ==="
+          grep -R -n -E 'SDL_Renderer|Renderer' ../src ../include
+          
           cmake --build . --parallel
 
           cd ../..
