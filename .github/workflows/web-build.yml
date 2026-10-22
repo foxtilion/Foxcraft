@@ -259,7 +259,11 @@ jobs:
             -DPNG_PNG_INCLUDE_DIR="$GITHUB_WORKSPACE/libpng/include" \
             -DOPENGLES2_LIBRARY="$EMSDK/upstream/emscripten/cache/sysroot/lib/wasm32-emscripten/libGL.a" \
             -DEGL_LIBRARY="$EMSDK/upstream/emscripten/cache/sysroot/lib/wasm32-emscripten/libEGL.a"
-
+          
+          echo "=== Renderer declarations ==="
+          grep -R -n -E 'SDL_Renderer|Renderer|SDL_Window.*Window' ../src ../include
+          echo "=== Emscripten window creation ==="
+          sed -n '600,645p' ../src/CIrrDeviceSDL.cpp
           cmake --build . --parallel
 
           cd ../..
