@@ -23,13 +23,8 @@ LOCAL_SRC_FILES := deps/harfbuzz/lib/$(APP_ABI)/libharfbuzz.a
 include $(PREBUILT_STATIC_LIBRARY)
 
 include $(CLEAR_VARS)
-LOCAL_MODULE := Cairo
-LOCAL_SRC_FILES := deps/cairo/lib/$(APP_ABI)/libcairo.a
-include $(PREBUILT_STATIC_LIBRARY)
-
-include $(CLEAR_VARS)
-LOCAL_MODULE := Pixman
-LOCAL_SRC_FILES := deps/pixman/lib/$(APP_ABI)/libpixman.a
+LOCAL_MODULE := HarfBuzzRaster
+LOCAL_SRC_FILES := deps/harfbuzz/lib/$(APP_ABI)/libharfbuzz-raster.a
 include $(PREBUILT_STATIC_LIBRARY)
 
 include $(CLEAR_VARS)
@@ -88,8 +83,8 @@ LOCAL_SRC_FILES := deps/oboe/lib/$(APP_ABI)/liboboe.a
 include $(PREBUILT_STATIC_LIBRARY)
 
 include $(CLEAR_VARS)
-LOCAL_MODULE := Vorbis
-LOCAL_SRC_FILES := deps/vorbis/lib/$(APP_ABI)/libvorbis.a
+LOCAL_MODULE := Nogg
+LOCAL_SRC_FILES := deps/libnogg/lib/$(APP_ABI)/libnogg.a
 include $(PREBUILT_STATIC_LIBRARY)
 
 include $(CLEAR_VARS)
@@ -113,8 +108,8 @@ LOCAL_CFLAGS += \
 	-DENABLE_GLES=1                                \
 	-DUSE_CURL=1                                   \
 	-DUSE_SOUND=1                                  \
-	-DUSE_FREETYPE=1                               \
-	-DUSE_CAIRO=1                                  \
+	-DUSE_NOGG=1                                   \
+	-DUSE_HARFBUZZ_RASTER=1                        \
 	-DUSE_LEVELDB=1                                \
 	-DUSE_SQLITE=0                                 \
 	-DUSE_LUAJIT=1                                 \
@@ -128,7 +123,7 @@ LOCAL_CFLAGS += \
 	$(GPROF_DEF)
 
 ifdef NDEBUG
-	LOCAL_CFLAGS += -DNDEBUG=1
+	LOCAL_CFLAGS += -DNDEBUG=1 -DPROFILER_STUB=1
 endif
 
 LOCAL_C_INCLUDES := \
@@ -140,7 +135,6 @@ LOCAL_C_INCLUDES := \
 	../../lib/sheenbidi/Headers                    \
 	deps/freetype/include                          \
 	deps/harfbuzz/include                          \
-	deps/cairo/include                             \
 	deps/gettext/include                           \
 	deps/irrlicht/include                          \
 	deps/libpng/include                            \
@@ -151,7 +145,7 @@ LOCAL_C_INCLUDES := \
 	deps/luajit/include                            \
 	deps/openal/include                            \
 	deps/boringssl/include                         \
-	deps/vorbis/include                            \
+	deps/libnogg/include                           \
 	deps/zstd/include
 
 LOCAL_SRC_FILES := \
@@ -159,6 +153,10 @@ LOCAL_SRC_FILES := \
 	../../src/client/meshgen/collector.cpp         \
 	../../src/client/render/core.cpp               \
 	../../src/client/render/plain.cpp              \
+	../../src/client/shadows/dynamicshadows.cpp    \
+	../../src/client/shadows/dynamicshadowsrender.cpp \
+	../../src/client/shadows/shadowsScreenQuad.cpp \
+	../../src/client/shadows/shadowsshadercallbacks.cpp \
 	$(wildcard ../../src/content/*.cpp)            \
 	../../src/database/database.cpp                \
 	../../src/database/database-dummy.cpp          \
@@ -313,12 +311,12 @@ LOCAL_SRC_FILES += ../../lib/sheenbidi/Source/SheenBidi.c
 
 LOCAL_STATIC_LIBRARIES += \
 	Curl libssl libcrypto libnghttp2 \
-	Freetype HarfBuzz Cairo Pixman \
+	Freetype HarfBuzzRaster HarfBuzz \
 	oboe OpenAL \
 	Gettext \
 	Irrlicht libpng libjpeg SDL \
 	LevelDB \
-	Vorbis \
+	Nogg \
 	LuaJIT \
 	zstd
 

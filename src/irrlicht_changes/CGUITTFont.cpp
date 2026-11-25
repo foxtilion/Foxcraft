@@ -32,6 +32,7 @@
 #include <irrlicht.h>
 #include <cstring>
 #include "CGUITTFont.h"
+#include <harfbuzz/hb-ot.h>
 #include "debug.h"
 #include "util/string.h"
 
@@ -100,6 +101,31 @@ u32 getBestFixedSizeIndex(FT_Face face, u32 font_size)
 
 	return index;
 }
+
+#ifdef USE_HARFBUZZ_RASTER
+// Paints a vector color glyph into a square of 1.5 sizes with the baseline at size from the top
+static hb_raster_image_t *paintColorGlyph(FT_Face face, u32 char_index, u32 size)
+{
+	hb_raster_paint_t *paint = hb_raster_paint_create_or_fail();
+	if (!paint)
+		return nullptr;
+
+	const u32 side = size * 1.5f;
+	const hb_raster_extents_t extents = {0, (int)size - (int)side, side, side, 0};
+	hb_raster_paint_set_extents(paint, &extents);
+	// The font counts in 1/64 of a pixel
+	hb_raster_paint_set_scale_factor(paint, 64, 64);
+
+	hb_font_t *font = hb_ft_font_create_referenced(face);
+	// A glyph without color paint comes out as its outline, a space as an empty image
+	hb_raster_paint_glyph(paint, font, char_index);
+	hb_raster_image_t *image = hb_raster_paint_render(paint);
+
+	hb_font_destroy(font);
+	hb_raster_paint_destroy(paint);
+	return image;
+}
+#endif
 
 video::IImage* SGUITTGlyph::createGlyphImage(const FT_Face& face, const FT_Bitmap& bits, video::IVideoDriver* driver, video::SColor color) const
 {
@@ -210,7 +236,7 @@ video::IImage* SGUITTGlyph::createGlyphImage(const FT_Face& face, const FT_Bitma
 
 void SGUITTGlyph::preload(u32 char_index, FT_Face face,
 		video::IVideoDriver* driver, u32 font_size, const FT_Int32 loadFlags,
-		bool bold, bool italic, u16 outline, u8 outline_type, s8 character_spacing)
+		bool bold, bool italic, u16 outline, u8 outline_type)
 {
 	if (isLoaded) return;
 
@@ -221,7 +247,6 @@ void SGUITTGlyph::preload(u32 char_index, FT_Face face,
 	}
 
 	float scale = 1.0f;
-	float bold_offset = 0;
 
 	// Set the size of the glyph.
 	FT_Set_Pixel_Sizes(face, 0, font_size);
@@ -241,10 +266,8 @@ void SGUITTGlyph::preload(u32 char_index, FT_Face face,
 
 	FT_Glyph glyph = nullptr;
 	FT_Bitmap bits;
-#ifdef USE_CAIRO
-	cairo_surface_t *cairo_surface = nullptr;
-	cairo_t *cairo = nullptr;
-	cairo_font_face_t *cairo_font_face = nullptr;
+#ifdef USE_HARFBUZZ_RASTER
+	hb_raster_image_t *color_image = nullptr;
 #endif
 
 	FT_GlyphSlot glyph_slot = face->glyph;
@@ -252,15 +275,15 @@ void SGUITTGlyph::preload(u32 char_index, FT_Face face,
 		if (FT_Get_Glyph(glyph_slot, &glyph) != FT_Err_Ok)
 			return;
 
+		const bool outlined = glyph->format == FT_GLYPH_FORMAT_OUTLINE;
 		FT_OutlineGlyph glyph_outline = (FT_OutlineGlyph)glyph;
 
-		if (bold) {
+		if (bold && outlined) {
 			float embolden_amount = (float)font_size * 2.0f;
-			bold_offset = embolden_amount * 2.0f;
 			FT_Outline_Embolden(&(glyph_outline->outline), embolden_amount);
 		}
 
-		if (italic) {
+		if (italic && outlined) {
 			FT_Matrix italic_matrix;
 			float slant = 0.2;
 			italic_matrix.xx = 0x10000;
@@ -271,7 +294,6 @@ void SGUITTGlyph::preload(u32 char_index, FT_Face face,
 			FT_Outline_Transform(&(glyph_outline->outline), &italic_matrix);
 		}
 
-		bold_offset += (float)character_spacing * 64.0f;
 		if (outline > 0) {
 			FT_Pos outline_strength = outline * 64;
 
@@ -324,39 +346,21 @@ void SGUITTGlyph::preload(u32 char_index, FT_Face face,
 		offset = core::vector2di(glyph_slot->bitmap_left * scale, bitmap_top);
 
 	} else {
-#ifdef USE_CAIRO
-		cairo_surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32,
-				font_size * 1.5f, font_size * 1.5f);
+#ifdef USE_HARFBUZZ_RASTER
+		color_image = paintColorGlyph(face, char_index, font_size);
+		if (!color_image)
+			return;
 
-		cairo = cairo_create(cairo_surface);
+		hb_raster_extents_t extents;
+		hb_raster_image_get_extents(color_image, &extents);
 
-		cairo_set_operator(cairo, CAIRO_OPERATOR_CLEAR);
-		cairo_paint(cairo);
-		cairo_set_operator(cairo, CAIRO_OPERATOR_OVER);
-
-		cairo_font_face = cairo_ft_font_face_create_for_ft_face(face, 0);
-
-		cairo_set_font_face(cairo, cairo_font_face);
-		cairo_set_font_size(cairo, font_size);
-
-		cairo_glyph_t cairo_glyph;
-		cairo_glyph.index = char_index;
-		cairo_glyph.x = 0;
-		cairo_glyph.y = font_size;
-
-		cairo_show_glyphs(cairo, &cairo_glyph, 1);
-		cairo_surface_flush(cairo_surface);
-
-		unsigned char* data = cairo_image_surface_get_data(cairo_surface);
-		int stride = cairo_image_surface_get_stride(cairo_surface);
-		int w = cairo_image_surface_get_width(cairo_surface);
-		int h = cairo_image_surface_get_height(cairo_surface);
-
-		bits.width = w;
-		bits.rows = h;
-		bits.pitch = stride;
+		// The image keeps its rows bottom up
+		bits.width = extents.width;
+		bits.rows = extents.height;
+		bits.pitch = -(int)extents.stride;
 		bits.pixel_mode = FT_PIXEL_MODE_BGRA;
-		bits.buffer = data;
+		bits.buffer = (unsigned char *)hb_raster_image_get_buffer(color_image) +
+				(extents.height - 1) * extents.stride;
 
 		offset = core::vector2di(0, (int)(font_size));
 #else
@@ -396,12 +400,8 @@ void SGUITTGlyph::preload(u32 char_index, FT_Face face,
 		if (!page) {
 			// Retrying it would take another page on every draw
 			tooLarge = true;
-#ifdef USE_CAIRO
-			if (FT_HAS_COLOR(face) && face->num_fixed_sizes == 0) {
-				cairo_font_face_destroy(cairo_font_face);
-				cairo_destroy(cairo);
-				cairo_surface_destroy(cairo_surface);
-			}
+#ifdef USE_HARFBUZZ_RASTER
+			hb_raster_image_destroy(color_image);
 #endif
 			if (glyph)
 				FT_Done_Glyph(glyph);
@@ -428,30 +428,27 @@ void SGUITTGlyph::preload(u32 char_index, FT_Face face,
 	// We grab the glyph bitmap here so the data won't be removed when the next glyph is loaded.
 	surface = createGlyphImage(face, bits, driver, color);
 
-#ifdef USE_CAIRO
-	if (FT_HAS_COLOR(face) && face->num_fixed_sizes == 0) {
-		cairo_font_face_destroy(cairo_font_face);
-		cairo_destroy(cairo);
-		cairo_surface_destroy(cairo_surface);
-	}
+#ifdef USE_HARFBUZZ_RASTER
+	hb_raster_image_destroy(color_image);
 #endif
 
 	if (glyph)
 		FT_Done_Glyph(glyph);
 
-	if (outline > 0 && !FT_HAS_COLOR(face)) {
+	if (outline > 0 && !FT_HAS_COLOR(face) && surface) {
 		FT_Glyph glyph;
 		if (FT_Get_Glyph(glyph_slot, &glyph) != FT_Err_Ok)
 			return;
 
+		const bool outlined = glyph->format == FT_GLYPH_FORMAT_OUTLINE;
 		FT_OutlineGlyph glyph_outline = (FT_OutlineGlyph)glyph;
 
-		if (bold) {
+		if (bold && outlined) {
 			float embolden_amount = (float)font_size * 2.0f;
 			FT_Outline_Embolden(&(glyph_outline->outline), embolden_amount);
 		}
 
-		if (italic) {
+		if (italic && outlined) {
 			FT_Matrix italic_matrix;
 			float slant = 0.2;
 			italic_matrix.xx = 0x10000;
@@ -467,17 +464,17 @@ void SGUITTGlyph::preload(u32 char_index, FT_Face face,
 
 		FT_Bitmap bits = bitmap_glyph->bitmap;
 		video::IImage* image = createGlyphImage(face, bits, driver, video::SColor(0,255,255,255));
-
-		core::dimension2du surface_size = surface->getDimension();
-		core::dimension2du image_size = image->getDimension();
-		s32 pos_x = std::round(((float)(surface_size.Width - image_size.Width)) / 2);
-		s32 pos_y = std::round(((float)(surface_size.Height - image_size.Height)) / 2);
-		core::position2d<s32> pos = core::position2d<s32>(pos_x, pos_y);
-		core::rect<s32> source_rect = core::rect<s32>(core::position2d<s32>(0, 0), image->getDimension());
-		video::SColor color = video::SColor(255,255,255,255);
-		image->copyToWithAlpha(surface, pos, source_rect, color, nullptr, true);
-
-		image->drop();
+		if (image) {
+			core::dimension2du surface_size = surface->getDimension();
+			core::dimension2du image_size = image->getDimension();
+			s32 pos_x = std::round(((float)(surface_size.Width - image_size.Width)) / 2);
+			s32 pos_y = std::round(((float)(surface_size.Height - image_size.Height)) / 2);
+			core::position2d<s32> pos = core::position2d<s32>(pos_x, pos_y);
+			core::rect<s32> source_rect(core::position2d<s32>(0, 0), image->getDimension());
+			video::SColor color = video::SColor(255,255,255,255);
+			image->copyToWithAlpha(surface, pos, source_rect, color, nullptr, true);
+			image->drop();
+		}
 		FT_Done_Glyph(glyph);
 	}
 
@@ -570,6 +567,9 @@ CGUITTFont::~CGUITTFont()
 			delete pair.second;
 	}
 
+	for (hb_font_t* hb_font : hb_fonts)
+		hb_font_destroy(hb_font);
+
 	for (auto filename : filenames) {
 		// We aren't using this face anymore.
 		core::map<io::path, SGUITTFace*>::Node* n = c_faces.find(filename);
@@ -608,7 +608,6 @@ bool CGUITTFont::load(const io::path& filename, const u32 size)
 	io::IFileSystem* filesystem = Environment->getFileSystem();
 	irr::ILogger* logger = (Device != 0 ? Device->getLogger() : 0);
 	this->size = size;
-	this->filenames.push_back(filename);
 
 	update_load_flags();
 
@@ -624,8 +623,6 @@ bool CGUITTFont::load(const io::path& filename, const u32 size)
 		face = new SGUITTFace();
 		c_faces.set(filename, face);
 
-		bool use_memory_face = true;
-
 		if (filesystem)
 		{
 			// Read in the file data.
@@ -640,21 +637,10 @@ bool CGUITTFont::load(const io::path& filename, const u32 size)
 				return false;
 			}
 
-			// A big font is mapped from disk instead of copied into the heap: its
-			// pages arrive on demand and the system can reclaim them under pressure
-			const size_t fileSize = file->getSize();
-			use_memory_face = fileSize <= (size_t)5 * 1024 * 1024;
-
-			if (!use_memory_face)
+			// Map the file, copy it to memory only if there is no real file behind the path
+			if (FT_New_Face(c_library, filename.c_str(), 0, &face->face))
 			{
-				std::string filename_utf8 = stringw_to_utf8(filename);
-				// no readable path behind the name, so fall back to a copy
-				if (FT_New_Face(c_library, filename_utf8.c_str(), 0, &face->face))
-					use_memory_face = true;
-			}
-
-			if (use_memory_face)
-			{
+				const size_t fileSize = file->getSize();
 				face->face_buffer = new FT_Byte[fileSize];
 				file->read(face->face_buffer, fileSize);
 				face->face_buffer_size = fileSize;
@@ -677,8 +663,7 @@ bool CGUITTFont::load(const io::path& filename, const u32 size)
 
 		if (!filesystem)
 		{
-			std::string filename_utf8 = stringw_to_utf8(filename);
-			if (FT_New_Face(c_library, filename_utf8.c_str(), 0, &face->face))
+			if (FT_New_Face(c_library, filename.c_str(), 0, &face->face))
 			{
 				if (logger) logger->log(L"CGUITTFont", L"FT_New_Face failed.", irr::ELL_INFORMATION);
 
@@ -697,6 +682,7 @@ bool CGUITTFont::load(const io::path& filename, const u32 size)
 	}
 
 	// Store our face.
+	filenames.push_back(filename);
 	tt_faces.push_back(face->face);
 
 	if (tt_faces.size() == 1) {
@@ -712,8 +698,8 @@ bool CGUITTFont::load(const io::path& filename, const u32 size)
 
 bool CGUITTFont::loadAdditionalFont(const io::path& filename, bool is_emoji_font)
 {
-	shaped_cache[0].clear();
-	shaped_cache[1].clear();
+	shaped_cache[0].invalidate();
+	shaped_cache[1].invalidate();
 
 	bool success = load(filename, size);
 
@@ -725,6 +711,10 @@ bool CGUITTFont::loadAdditionalFont(const io::path& filename, bool is_emoji_font
 	if (!success) {
 		filenames.pop_back();
 		tt_faces.pop_back();
+		if (hb_fonts.size() > tt_faces.size()) {
+			hb_font_destroy(hb_fonts.back());
+			hb_fonts.pop_back();
+		}
 
 		core::map<io::path, SGUITTFace*>::Node *node = c_faces.find(filename);
 		if (node) {
@@ -778,6 +768,18 @@ bool CGUITTFont::testEmojiFont(const io::path& filename)
 	if (char_index == 0)
 		return false;
 
+	if (FT_HAS_COLOR(face) && face->num_fixed_sizes == 0) {
+		// The color tables tell whether the emoji comes in color, without drawing it
+		hb_face_t *hb_face = hb_ft_face_create_referenced(face);
+		// FreeType draws in color only the layers of COLR version 0
+		bool color = hb_ot_color_glyph_get_layers(hb_face, char_index, 0, nullptr, nullptr) > 0;
+#ifdef USE_HARFBUZZ_RASTER
+		color = color || hb_ot_color_glyph_has_paint(hb_face, char_index);
+#endif
+		hb_face_destroy(hb_face);
+		return color;
+	}
+
 	FT_Int32 flags = load_flags;
 	if (FT_HAS_COLOR(face))
 		flags |= FT_LOAD_COLOR;
@@ -795,70 +797,18 @@ bool CGUITTFont::testEmojiFont(const io::path& filename)
 	if (FT_Load_Glyph(face, char_index, flags) != FT_Err_Ok)
 		return false;
 
-#ifdef USE_CAIRO
-	if (FT_HAS_COLOR(face) && face->num_fixed_sizes == 0) {
-		cairo_surface_t* cairo_surface = cairo_image_surface_create(
-				CAIRO_FORMAT_ARGB32, size * 1.5f, size * 1.5f);
-		cairo_t* cairo = cairo_create(cairo_surface);
-		cairo_font_face_t* cairo_face =
-				cairo_ft_font_face_create_for_ft_face(face, 0);
+	FT_GlyphSlot glyph = face->glyph;
+	FT_Bitmap bits = glyph->bitmap;
 
-		cairo_set_operator(cairo, CAIRO_OPERATOR_CLEAR);
-		cairo_paint(cairo);
-		cairo_set_operator(cairo, CAIRO_OPERATOR_OVER);
+	if (bits.rows < 1 || bits.width < 1)
+		return false;
 
-		cairo_set_font_face(cairo, cairo_face);
-		cairo_set_font_size(cairo, size);
+	if (FT_HAS_COLOR(face) && bits.pixel_mode != FT_PIXEL_MODE_BGRA)
+		return false;
 
-		cairo_glyph_t cairo_glyph;
-		cairo_glyph.index = char_index;
-		cairo_glyph.x = 0;
-		cairo_glyph.y = size;
-
-		cairo_show_glyphs(cairo, &cairo_glyph, 1);
-		cairo_surface_flush(cairo_surface);
-
-		unsigned char *data = cairo_image_surface_get_data(cairo_surface);
-		int stride = cairo_image_surface_get_stride(cairo_surface);
-		bool has_pixels = false;
-
-		u32* pixels = (u32*)data;
-		int buffer_size = stride/4 * size;
-		for (int i = 0; i < buffer_size; i++) {
-			if ((pixels[i] >> 24) > 0) {
-				has_pixels = true;
-				break;
-			}
-		}
-
-		cairo_font_face_destroy(cairo_face);
-		cairo_destroy(cairo);
-		cairo_surface_destroy(cairo_surface);
-
-		if (!has_pixels)
-			return false;
-
-	} else {
-#endif
-		FT_GlyphSlot glyph = face->glyph;
-
-		if (FT_HAS_COLOR(face) && face->num_fixed_sizes == 0)
-			FT_Render_Glyph(glyph, FT_RENDER_MODE_NORMAL);
-
-		FT_Bitmap bits = glyph->bitmap;
-
-		if (bits.rows < 1 || bits.width < 1)
-			return false;
-
-		if (FT_HAS_COLOR(face) && bits.pixel_mode != FT_PIXEL_MODE_BGRA)
-			return false;
-
-		if (!FT_HAS_COLOR(face) && bits.pixel_mode != FT_PIXEL_MODE_MONO &&
-				bits.pixel_mode != FT_PIXEL_MODE_GRAY)
-			return false;
-#ifdef USE_CAIRO
-	}
-#endif
+	if (!FT_HAS_COLOR(face) && bits.pixel_mode != FT_PIXEL_MODE_MONO &&
+			bits.pixel_mode != FT_PIXEL_MODE_GRAY)
+		return false;
 
 	return true;
 }
@@ -939,12 +889,12 @@ void CGUITTFont::calculateMaxFontHeight()
 std::vector<ShapedRun> CGUITTFont::shapeText(const core::stringw& text,
 		bool use_rtl) const
 {
-	auto& cache = shaped_cache[use_rtl ? 1 : 0];
+	return *shaped_cache[use_rtl ? 1 : 0].lookupCache(text);
+}
 
-	auto cached = cache.find(text);
-	if (cached != cache.end())
-		return cached->second;
-
+std::vector<ShapedRun> CGUITTFont::shapeUncached(const core::stringw& text,
+		bool use_rtl) const
+{
 	std::vector<ShapedRun> runs;
 
 	if (text.size() == 0)
@@ -980,10 +930,6 @@ std::vector<ShapedRun> CGUITTFont::shapeText(const core::stringw& text,
 		}
 	}
 
-	if (cache.size() >= 1024)
-		cache.clear();
-
-	cache[text] = runs;
 	return runs;
 }
 
@@ -1062,7 +1008,7 @@ std::vector<TextRun> CGUITTFont::splitIntoFontRuns(
 	for (u32 i = 0; i < text.size(); i++) {
 		wchar_t ch = text[i];
 		uint32_t codepoint = (uint32_t)ch;
-		
+
 #if defined(_WIN32) || defined(_WIN64)
 		if (i + 1 < text.size() && isSurrogatePair(ch, text[i + 1])) {
 			codepoint = 0x10000 + ((uint32_t)(ch - 0xD800) << 10) + (text[i + 1] - 0xDC00);
@@ -1119,7 +1065,14 @@ ShapedRun CGUITTFont::shapeRun(const TextRun& run,
 		FT_Select_Size(face, best_index);
 	}
 
-	hb_font_t* hb_font = hb_ft_font_create(face, nullptr);
+	// Each face keeps its HarfBuzz font and takes the size again, as fonts of other sizes share it
+	if (hb_fonts.size() <= run.face_index)
+		hb_fonts.resize(run.face_index + 1, nullptr);
+	hb_font_t*& hb_font = hb_fonts[run.face_index];
+	if (!hb_font)
+		hb_font = hb_ft_font_create(face, nullptr);
+	else
+		hb_ft_font_changed(hb_font);
 	hb_buffer_t* buf = hb_buffer_create();
 
 #if defined(_WIN32) || defined(_WIN64)
@@ -1131,6 +1084,8 @@ ShapedRun CGUITTFont::shapeRun(const TextRun& run,
 	hb_buffer_guess_segment_properties(buf);
 
 	hb_buffer_set_direction(buf, is_rtl ? HB_DIRECTION_RTL : HB_DIRECTION_LTR);
+	// Joiners and variation selectors keep their cluster, but no glyph is drawn for them
+	hb_buffer_set_invisible_glyph(buf, (hb_codepoint_t)-1);
 
 	float bold_offset = 0;
 	if (bold) {
@@ -1161,11 +1116,15 @@ ShapedRun CGUITTFont::shapeRun(const TextRun& run,
 		}
 
 		ShapedGlyph glyph;
-		glyph.glyph_index = glyph_info[i].codepoint;
+		const hb_codepoint_t codepoint = glyph_info[i].codepoint;
+		glyph.glyph_index = codepoint == (hb_codepoint_t)-1 ? 0 : codepoint;
 		glyph.cluster = glyph_info[i].cluster;
 		glyph.x_offset = glyph_pos[i].x_offset >> 6;
 		glyph.y_offset = glyph_pos[i].y_offset >> 6;
-		glyph.x_advance = x_advance + spacing_offset;
+		// The spacing goes after the whole cluster, so marks stay over their letter
+		const bool cluster_end = i + 1 == glyph_count ||
+				glyph_info[i + 1].cluster != glyph_info[i].cluster;
+		glyph.x_advance = cluster_end ? x_advance + spacing_offset : x_advance;
 		glyph.y_advance = y_advance;
 		glyph.face_index = run.face_index;
 
@@ -1173,7 +1132,6 @@ ShapedRun CGUITTFont::shapeRun(const TextRun& run,
 	}
 
 	hb_buffer_destroy(buf);
-	hb_font_destroy(hb_font);
 
 	return result;
 }
@@ -1210,7 +1168,7 @@ void CGUITTFont::loadGlyphsForShapedText(const std::vector<ShapedRun>& runs)
 					flags |= FT_LOAD_COLOR;
 
 				glyph->preload(glyph_idx, face, Driver, size, flags,
-						bold, italic, outline, outline_type, character_spacing);
+						bold, italic, outline, outline_type);
 
 				if (glyph->isLoaded && glyph->glyph_page < Glyph_Pages.size())
 					Glyph_Pages[glyph->glyph_page]->pushGlyphToBePaged(glyph);
@@ -1821,11 +1779,9 @@ video::IImage* CGUITTFont::createTextureFromChar(const uint32_t& ch)
 	video::ITexture* tex = page->texture;
 
 	// Acquire a read-only lock of the corresponding page texture.
-	#if IRRLICHT_VERSION_MAJOR==1 && IRRLICHT_VERSION_MINOR>=8
 	void* ptr = tex->lock(video::ETLM_READ_ONLY);
-	#else
-	void* ptr = tex->lock(true);
-	#endif
+	if (!ptr)
+		return nullptr;
 
 	video::ECOLOR_FORMAT format = tex->getColorFormat();
 	core::dimension2du tex_size = tex->getOriginalSize();
@@ -1835,6 +1791,7 @@ video::IImage* CGUITTFont::createTextureFromChar(const uint32_t& ch)
 	core::dimension2du glyph_size(glyph->source_rect.getSize());
 	video::IImage* image = Driver->createImage(format, glyph_size);
 	pageholder->copyTo(image, core::position2di(0, 0), glyph->source_rect);
+	pageholder->drop();
 
 	tex->unlock();
 
@@ -1989,11 +1946,7 @@ core::array<scene::ISceneNode*> CGUITTFont::addTextSceneNode(const wchar_t* text
 				// Now we copy planes corresponding to the letter size.
 				IMeshManipulator* mani = smgr->getMeshManipulator();
 				IMesh* meshcopy = mani->createMeshCopy(shared_plane_ptr_);
-				#if IRRLICHT_VERSION_MAJOR==1 && IRRLICHT_VERSION_MINOR>=8
 				mani->scale(meshcopy, vector3df((f32)letter_size.Width, (f32)letter_size.Height, 1));
-				#else
-				mani->scaleMesh(meshcopy, vector3df((f32)letter_size.Width, (f32)letter_size.Height, 1));
-				#endif
 
 				ISceneNode* current_node = smgr->addMeshSceneNode(meshcopy, parent, -1, current_pos);
 				meshcopy->drop();

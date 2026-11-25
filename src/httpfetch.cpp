@@ -23,7 +23,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <sstream>
 #include <utility>
 #include <list>
-#include <map>
+#include <unordered_map>
 #include <cerrno>
 #include <mutex>
 #include "threading/event.h"
@@ -39,16 +39,17 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "noise.h"
 #include "filesys.h"
 
-std::mutex g_httpfetch_mutex;
-std::map<unsigned long, std::queue<HTTPFetchResult> > g_httpfetch_results;
-PcgRandom g_callerid_randomness;
+static std::mutex g_httpfetch_mutex;
+static std::unordered_map<u64, std::queue<HTTPFetchResult>>
+	g_httpfetch_results;
+static PcgRandom g_callerid_randomness;
 #if defined(__ANDROID__) && defined(_IRR_COMPILE_WITH_SDL_DEVICE_)
 static std::string g_ca_cert_data;
 #endif
 
 HTTPFetchRequest::HTTPFetchRequest() :
 	timeout(g_settings->getS32("curl_timeout")),
-	connect_timeout(timeout),
+	connect_timeout(10 * 1000),
 	useragent(std::string(PROJECT_NAME_C "/") + g_version_hash + " " +
 		porting::getPlatformName() + " (" + porting::get_sysinfo() + ")")
 {
@@ -57,24 +58,22 @@ HTTPFetchRequest::HTTPFetchRequest() :
 
 static void httpfetch_deliver_result(HTTPFetchResult &&fetch_result)
 {
-	unsigned long caller = fetch_result.caller;
+	u64 caller = fetch_result.caller;
 	if (caller != HTTPFETCH_DISCARD) {
 		MutexAutoLock lock(g_httpfetch_mutex);
 		g_httpfetch_results[caller].push(std::move(fetch_result));
 	}
 }
 
-static void httpfetch_request_clear(unsigned long caller);
+static void httpfetch_request_clear(u64 caller);
 
-unsigned long httpfetch_caller_alloc()
+u64 httpfetch_caller_alloc()
 {
 	MutexAutoLock lock(g_httpfetch_mutex);
 
-	// Check each caller ID except HTTPFETCH_DISCARD
-	const unsigned long discard = HTTPFETCH_DISCARD;
-	for (unsigned long caller = discard + 1; caller != discard; ++caller) {
-		std::map<unsigned long, std::queue<HTTPFetchResult> >::iterator
-			it = g_httpfetch_results.find(caller);
+	// Check each caller ID except reserved ones
+	for (u64 caller = HTTPFETCH_CID_START; caller != 0; ++caller) {
+		auto it = g_httpfetch_results.find(caller);
 		if (it == g_httpfetch_results.end()) {
 			verbosestream << "httpfetch_caller_alloc: allocating "
 					<< caller << std::endl;
@@ -85,18 +84,17 @@ unsigned long httpfetch_caller_alloc()
 	}
 
 	FATAL_ERROR("httpfetch_caller_alloc: ran out of caller IDs");
-	return discard;
 }
 
-unsigned long httpfetch_caller_alloc_secure()
+u64 httpfetch_caller_alloc_secure()
 {
 	MutexAutoLock lock(g_httpfetch_mutex);
 
 	// Generate random caller IDs and make sure they're not
-	// already used or equal to HTTPFETCH_DISCARD
+	// already used or reserved.
 	// Give up after 100 tries to prevent infinite loop
-	u8 tries = 100;
-	unsigned long caller;
+	size_t tries = 100;
+	u64 caller;
 
 	do {
 		caller = (((u64) g_callerid_randomness.next()) << 32) |
@@ -106,7 +104,8 @@ unsigned long httpfetch_caller_alloc_secure()
 			FATAL_ERROR("httpfetch_caller_alloc_secure: ran out of caller IDs");
 			return HTTPFETCH_DISCARD;
 		}
-	} while (g_httpfetch_results.find(caller) != g_httpfetch_results.end());
+	} while (caller >= HTTPFETCH_CID_START &&
+		g_httpfetch_results.find(caller) != g_httpfetch_results.end());
 
 	verbosestream << "httpfetch_caller_alloc_secure: allocating "
 		<< caller << std::endl;
@@ -116,7 +115,7 @@ unsigned long httpfetch_caller_alloc_secure()
 	return caller;
 }
 
-void httpfetch_caller_free(unsigned long caller)
+void httpfetch_caller_free(u64 caller)
 {
 	verbosestream<<"httpfetch_caller_free: freeing "
 			<<caller<<std::endl;
@@ -128,13 +127,12 @@ void httpfetch_caller_free(unsigned long caller)
 	}
 }
 
-bool httpfetch_async_get(unsigned long caller, HTTPFetchResult &fetch_result)
+bool httpfetch_async_get(u64 caller, HTTPFetchResult &fetch_result)
 {
 	MutexAutoLock lock(g_httpfetch_mutex);
 
 	// Check that caller exists
-	std::map<unsigned long, std::queue<HTTPFetchResult> >::iterator
-		it = g_httpfetch_results.find(caller);
+	auto it = g_httpfetch_results.find(caller);
 	if (it == g_httpfetch_results.end())
 		return false;
 
@@ -144,7 +142,7 @@ bool httpfetch_async_get(unsigned long caller, HTTPFetchResult &fetch_result)
 		return false;
 
 	// Pop first result
-	fetch_result = caller_results.front();
+	fetch_result = std::move(caller_results.front());
 	caller_results.pop();
 	return true;
 }
@@ -404,10 +402,17 @@ HTTPFetchResult * HTTPFetchOngoing::complete(CURLcode res)
 	}
 
 	if (res != CURLE_OK) {
-		warningstream << request.url << " not found ("
-			<< curl_easy_strerror(res) << ")"
-			<< " (response code " << result.response_code << ")"
+		warningstream << "HTTPFetch for " << request.url << " failed ("
+			<< curl_easy_strerror(res) << ")" << std::endl;
+	} else if (result.response_code >= 400) {
+		warningstream << "HTTPFetch for " << request.url
+			<< " returned response code " << result.response_code
 			<< std::endl;
+		if (result.caller == HTTPFETCH_PRINT_ERR && !result.data.empty()) {
+			warningstream << "Response body:" << std::endl;
+			safe_print_string(warningstream, result.data);
+			warningstream << std::endl;
+		}
 	}
 
 	return &result;
@@ -503,7 +508,7 @@ public:
 		m_requests.push_back(req);
 	}
 
-	void requestClear(unsigned long caller, Event *event)
+	void requestClear(u64 caller, Event *event)
 	{
 		Request req;
 		req.type = RT_CLEAR;
@@ -540,7 +545,7 @@ protected:
 
 		}
 		else if (req.type == RT_CLEAR) {
-			unsigned long caller = req.fetch_request.caller;
+			u64 caller = req.fetch_request.caller;
 
 			// Abort all ongoing fetches for the caller
 			for (std::vector<HTTPFetchOngoing*>::iterator
@@ -815,10 +820,13 @@ void httpfetch_cleanup()
 {
 	verbosestream<<"httpfetch_cleanup: cleaning up"<<std::endl;
 
-	g_httpfetch_thread->stop();
-	g_httpfetch_thread->requestWakeUp();
-	g_httpfetch_thread->wait();
-	delete g_httpfetch_thread;
+	if (g_httpfetch_thread) {
+		g_httpfetch_thread->stop();
+		g_httpfetch_thread->requestWakeUp();
+		g_httpfetch_thread->wait();
+		delete g_httpfetch_thread;
+		g_httpfetch_thread = nullptr;
+	}
 
 	curl_global_cleanup();
 }
@@ -830,7 +838,7 @@ void httpfetch_async(const HTTPFetchRequest &fetch_request)
 		g_httpfetch_thread->start();
 }
 
-static void httpfetch_request_clear(unsigned long caller)
+static void httpfetch_request_clear(u64 caller)
 {
 	if (g_httpfetch_thread->isRunning()) {
 		Event event;
@@ -890,7 +898,7 @@ void httpfetch_async(const HTTPFetchRequest &fetch_request)
 	httpfetch_deliver_result(std::move(fetch_result));
 }
 
-static void httpfetch_request_clear(unsigned long caller)
+static void httpfetch_request_clear(u64 caller)
 {
 }
 

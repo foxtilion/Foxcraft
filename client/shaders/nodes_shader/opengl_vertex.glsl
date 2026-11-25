@@ -2,21 +2,13 @@ uniform mat4 mWorld;
 
 // Color of the light emitted by the sun.
 uniform vec3 dayLight;
-uniform vec3 eyePosition;
 uniform mediump float fogDistance;
 
 // The cameraOffset is the current center of the visible world.
 uniform vec3 cameraOffset;
 uniform float animationTimer;
 
-varying vec3 vPosition;
-// World position in the visible world (i.e. relative to the cameraOffset.)
-// This can be used for many shader effects without loss of precision.
-// If the absolute position is required it can be calculated with
-// cameraOffset + worldPosition (for large coordinates the limits of float
-// precision must be considered).
-varying vec3 worldPosition;
-varying lowp vec4 varColor;
+varying mediump vec4 varColor;
 // The centroid keyword ensures that after interpolation the texture coordinates
 // lie within the same bounds when MSAA is en- and disabled.
 // This fixes the stripes problem with nearest-neighbour textures and MSAA.
@@ -25,17 +17,46 @@ varying mediump vec2 varTexCoord;
 #else
 centroid varying vec2 varTexCoord;
 #endif
-varying vec3 eyeVec;
 #if POINT_LIGHTS
-varying float vShade;
-varying vec3 vRelPos;
+varying vec3 eyeVec;
+#else
+#ifdef SETTINGS_UNIFORMS
+uniform float fogShadingParameter;
+#else
+const float fogStart = FOG_START;
+const float fogShadingParameter = 1.0 / (1.0 - fogStart);
+#endif
+#endif
+
+#ifdef ENABLE_DYNAMIC_SHADOWS
+	// shadow uniforms
+	uniform vec3 v_LightDirection;
+	uniform float f_textureresolution;
+	uniform mat4 m_ShadowViewProj;
+	uniform float f_shadowfar;
+	uniform float f_shadow_strength;
+	uniform float f_timeofday;
+	varying float cosLight;
+	varying float normalOffsetScale;
+	varying float adj_shadow_strength;
+	varying float f_normal_length;
+	varying vec3 vNormal;
+	varying vec3 worldPosition;
+	varying float nightRatio;
 #endif
 
 // Color of the light emitted by the light sources.
 const vec3 artificialLight = vec3(1.04, 1.04, 1.04);
-const float e = 2.718281828459;
-const float BS = 10.0;
 
+#ifdef ENABLE_DYNAMIC_SHADOWS
+// custom smoothstep implementation because it's not defined in glsl1.2
+// https://docs.gl/sl4/smoothstep
+float mtsmoothstep(in float edge0, in float edge1, in float x)
+{
+	float t = clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
+	return t * t * (3.0 - 2.0 * t);
+}
+#endif
 
 float smoothCurve(float x)
 {
@@ -56,6 +77,13 @@ float smoothTriangleWave(float x)
 
 // OpenGL < 4.3 does not support continued preprocessor lines
 #if (MATERIAL_TYPE == TILE_MATERIAL_WAVING_LIQUID_TRANSPARENT || MATERIAL_TYPE == TILE_MATERIAL_WAVING_LIQUID_OPAQUE || MATERIAL_TYPE == TILE_MATERIAL_WAVING_LIQUID_BASIC) && ENABLE_WAVING_WATER
+
+#ifdef SETTINGS_UNIFORMS
+uniform vec3 waterWave;
+#define WATER_WAVE_HEIGHT waterWave.x
+#define WATER_WAVE_LENGTH waterWave.y
+#define WATER_WAVE_SPEED waterWave.z
+#endif
 
 //
 // Simple, fast noise function.
@@ -108,21 +136,13 @@ void main(void)
 		smoothTriangleWave(animationTimer * 13.0 + tOffset)) * 0.5;
 #endif
 
-	worldPosition = (mWorld * inVertexPosition).xyz;
-#if POINT_LIGHTS
-	vec3 sq = inVertexNormal * inVertexNormal;
-	vShade = sq.x + sq.y + sq.z < 0.5 ? 1.0 : sqrt(0.45) * sq.x +
-		(inVertexNormal.y < 0.0 ? sqrt(0.2) : 1.0) * sq.y + sqrt(0.7) * sq.z;
-	vRelPos = worldPosition - (eyePosition - cameraOffset);
-#endif
-
 // OpenGL < 4.3 does not support continued preprocessor lines
 #if (MATERIAL_TYPE == TILE_MATERIAL_WAVING_LIQUID_TRANSPARENT || MATERIAL_TYPE == TILE_MATERIAL_WAVING_LIQUID_OPAQUE || MATERIAL_TYPE == TILE_MATERIAL_WAVING_LIQUID_BASIC) && ENABLE_WAVING_WATER
 	// Generate waves with Perlin-type noise.
 	// The constants are calibrated such that they roughly
 	// correspond to the old sine waves.
 	vec4 pos = inVertexPosition;
-	vec3 wavePos = worldPosition + cameraOffset;
+	vec3 wavePos = (mWorld * inVertexPosition).xyz + cameraOffset;
 	// The waves are slightly compressed along the z-axis to get
 	// wave-fronts along the x-axis.
 	wavePos.x /= WATER_WAVE_LENGTH * 3.0;
@@ -147,8 +167,13 @@ void main(void)
 	gl_Position = mWorldViewProj * inVertexPosition;
 #endif
 
+#if POINT_LIGHTS
 	eyeVec = -(mWorldView * inVertexPosition).xyz / fogDistance;
-	vPosition = gl_Position.xyz;
+#endif
+#ifdef ENABLE_DYNAMIC_SHADOWS
+	worldPosition = (mWorld * inVertexPosition).xyz;
+	vNormal = inVertexNormal;
+#endif
 
 
 	// Calculate color.
@@ -162,6 +187,9 @@ void main(void)
 #endif
 	// The alpha gives the ratio of sunlight in the incoming light.
 	color.rgb *= 2.0 * mix(artificialLight.rgb, dayLight.rgb, color.a);
+#ifdef ENABLE_DYNAMIC_SHADOWS
+	nightRatio = 1.0 - color.a;
+#endif
 	color.a = 1.0;
 
 	// Emphase blue a bit in darker places
@@ -171,4 +199,36 @@ void main(void)
 		0.07 * brightness);
 
 	varColor = clamp(color, 0.0, 1.0);
+#if POINT_LIGHTS
+	// The shading of the face for the point lights, in the alpha the fragment has no other use for
+	vec3 sq = inVertexNormal * inVertexNormal;
+	varColor.a = sq.x + sq.y + sq.z < 0.5 ? 1.0 : sqrt(0.45) * sq.x +
+		(inVertexNormal.y < 0.0 ? sqrt(0.2) : 1.0) * sq.y + sqrt(0.7) * sq.z;
+#else
+	// The clarity of the fog, in the alpha the fragment has no other use for; unclamped, it
+	// interpolates as the distance does. -1.0 turns the fog off
+	varColor.a = fogDistance > 0.0 ? fogShadingParameter - fogShadingParameter *
+		length((mWorldView * inVertexPosition).xyz) / fogDistance : 1.0;
+#endif
+
+#ifdef ENABLE_DYNAMIC_SHADOWS
+	vec3 nNormal = normalize(vNormal);
+	cosLight = dot(nNormal, -v_LightDirection);
+	float texelSize = 767.0 / f_textureresolution;
+	float slopeScale = clamp(1.0 - abs(cosLight), 0.0, 1.0);
+	normalOffsetScale = texelSize * slopeScale;
+	
+	if (f_timeofday < 0.2) {
+		adj_shadow_strength = f_shadow_strength * 0.5 *
+			(1.0 - mtsmoothstep(0.18, 0.2, f_timeofday));
+	} else if (f_timeofday >= 0.8) {
+		adj_shadow_strength = f_shadow_strength * 0.5 *
+			mtsmoothstep(0.8, 0.83, f_timeofday);
+	} else {
+		adj_shadow_strength = f_shadow_strength *
+			mtsmoothstep(0.20, 0.25, f_timeofday) *
+			(1.0 - mtsmoothstep(0.7, 0.8, f_timeofday));
+	}
+	f_normal_length = length(vNormal);
+#endif
 }

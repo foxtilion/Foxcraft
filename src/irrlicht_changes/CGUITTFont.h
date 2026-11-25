@@ -35,6 +35,7 @@
 #include <ft2build.h>
 #include <vector>
 #include <map>
+#include "util/container.h"
 #include "util/enriched_string.h"
 #include FT_FREETYPE_H
 #include FT_OUTLINE_H
@@ -44,9 +45,8 @@
 #include <harfbuzz/hb.h>
 #include <harfbuzz/hb-ft.h>
 #include <SheenBidi/SheenBidi.h>
-#ifdef USE_CAIRO
-#include <cairo/cairo.h>
-#include <cairo/cairo-ft.h>
+#ifdef USE_HARFBUZZ_RASTER
+#include <harfbuzz/hb-raster.h>
 #endif
 
 namespace irr
@@ -119,7 +119,7 @@ namespace gui
 		//! before the batch draw call.
 		void preload(u32 char_index, FT_Face face, video::IVideoDriver* driver,
 				u32 font_size, const FT_Int32 loadFlags, bool bold,
-				bool italic, u16 outline, u8 outline_type, s8 character_spacing);
+				bool italic, u16 outline, u8 outline_type);
 
 		//! Unloads the glyph.
 		void unload();
@@ -467,6 +467,7 @@ namespace gui
 
 			std::vector<ShapedRun> shapeText(const core::stringw& text,
 				bool use_rtl = true) const;
+			std::vector<ShapedRun> shapeUncached(const core::stringw& text, bool use_rtl) const;
 			std::vector<BidiRun> getBidiRuns(
 					const core::stringw& text) const;
 			std::vector<TextRun> splitIntoFontRuns(
@@ -481,8 +482,17 @@ namespace gui
 			video::IVideoDriver* Driver = nullptr;
 			std::vector<io::path> filenames;
 			std::vector<FT_Face> tt_faces;
+			//! HarfBuzz fonts of the faces, made when a face is first shaped
+			mutable std::vector<hb_font_t*> hb_fonts;
 
-			mutable std::map<core::stringw, std::vector<ShapedRun>> shaped_cache[2];
+			//! Recently shaped texts, without and with bidi reordering
+			mutable LRUCache<core::stringw, std::vector<ShapedRun>> shaped_cache[2] = {
+				{1024, [](void* font, const core::stringw& text, std::vector<ShapedRun>* runs) {
+					*runs = static_cast<CGUITTFont*>(font)->shapeUncached(text, false);
+				}, this},
+				{1024, [](void* font, const core::stringw& text, std::vector<ShapedRun>* runs) {
+					*runs = static_cast<CGUITTFont*>(font)->shapeUncached(text, true);
+				}, this}};
 			std::vector<int> tt_offsets;
 			FT_Size_Metrics font_metrics;
 			FT_Int32 load_flags = 0;

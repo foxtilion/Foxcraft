@@ -987,7 +987,8 @@ void ServerEnvironment::activateBlock(MapBlock *block, u32 additional_dtime)
 			<<stamp<<", game time: "<<m_game_time<<std::endl;*/
 
 	// Remove stored static objects if clearObjects was called since block's timestamp
-	if (stamp == BLOCK_TIMESTAMP_UNDEFINED || stamp < m_last_clear_objects_time) {
+	// Note that non-generated blocks may still have stored static objects
+	if (stamp != BLOCK_TIMESTAMP_UNDEFINED && stamp < m_last_clear_objects_time) {
 		block->m_static_objects.m_stored.clear();
 		// do not set changed flag to avoid unnecessary mapblock writes
 	}
@@ -1580,6 +1581,21 @@ void ServerEnvironment::step(float dtime)
 	m_server->sendDetachedInventories(PEER_ID_INEXISTENT, true);
 }
 
+ServerEnvironment::BlockStatus ServerEnvironment::getBlockStatus(v3s16 blockpos)
+{
+	if (m_active_blocks.contains(blockpos))
+		return BS_ACTIVE;
+
+	const MapBlock *block = m_map->getBlockNoCreateNoEx(blockpos);
+	if (block && !block->isDummy())
+		return BS_LOADED;
+
+	if (m_map->isBlockInQueue(blockpos))
+		return BS_EMERGING;
+
+	return BS_UNKNOWN;
+}
+
 u32 ServerEnvironment::addParticleSpawner(float exptime)
 {
 	// Timers with lifetime 0 do not expire
@@ -1776,6 +1792,7 @@ u16 ServerEnvironment::addActiveObjectRaw(ServerActiveObject *object,
 	// Register reference in scripting api (must be done before post-init)
 	m_script->addObjectReference(object);
 	// Post-initialize object
+	// Note that this can change the value of isStaticAllowed() in case of LuaEntitySAO
 	object->addedToEnvironment(dtime_s);
 
 	// Add static data to block
@@ -1796,11 +1813,19 @@ u16 ServerEnvironment::addActiveObjectRaw(ServerActiveObject *object,
 					MOD_REASON_ADD_ACTIVE_OBJECT_RAW);
 		} else {
 			v3s16 p = floatToInt(objectpos, BS);
-			errorstream<<"ServerEnvironment::addActiveObjectRaw(): "
-				<<"could not emerge block for storing id="<<object->getId()
-				<<" statically (pos="<<PP(p)<<")"<<std::endl;
+			errorstream << "ServerEnvironment::addActiveObjectRaw(): "
+				<< "could not emerge block " << PP(p) << " for storing id="
+				<< object->getId() << " statically" << std::endl;
+			// clean in case of error
+			object->markForRemoval();
+			object->removingFromEnvironment();
+			m_script->removeObjectReference(object);
+			m_ao_manager.removeObject(object->getId());
+			return 0;
 		}
 	}
+
+	assert(object->m_static_exists == object->isStaticAllowed());
 
 	return object->getId();
 }

@@ -108,7 +108,6 @@ void decompressZlib(std::istream &is, std::ostream &os, size_t limit)
 	char output_buffer[bufsize];
 	int status = 0;
 	int ret;
-	//int bytes_read = 0;
 	int bytes_written = 0;
 	int input_buffer_len = 0;
 
@@ -158,7 +157,6 @@ void decompressZlib(std::istream &is, std::ostream &os, size_t limit)
 		//dstream<<"1 z.avail_in="<<z.avail_in<<std::endl;
 		status = inflate(&z, Z_NO_FLUSH);
 		//dstream<<"2 z.avail_in="<<z.avail_in<<std::endl;
-		//bytes_read += is.gcount() - z.avail_in;
 		//dstream<<"bytes_read="<<bytes_read<<std::endl;
 
 		if(status == Z_NEED_DICT || status == Z_DATA_ERROR
@@ -208,11 +206,31 @@ struct ZSTD_Deleter {
 	}
 };
 
+#if defined(__MINGW32__) && !defined(__MINGW64__)
+/*
+ * This is exactly as dumb as it looks.
+ * Yes, this is a memory leak. No, we don't have better solution right now.
+ */
+template<typename T> class leaky_ptr
+{
+	T *value;
+public:
+	leaky_ptr(T *value) : value(value) {};
+	T *get() { return value; }
+};
+#endif
+
 void compressZstd(const u8 *data, size_t data_size, std::ostream &os, int level)
 {
+#if defined(__MINGW32__) && !defined(__MINGW64__)
+	// leaks one context per thread but doesn't crash :shrug:
+	thread_local leaky_ptr<ZSTD_CStream> stream(ZSTD_createCStream());
+#else
 	// reusing the context is recommended for performance
 	// it will destroyed when the thread ends
 	thread_local std::unique_ptr<ZSTD_CStream, ZSTD_Deleter> stream(ZSTD_createCStream());
+#endif
+
 
 	ZSTD_initCStream(stream.get(), level);
 
@@ -268,9 +286,14 @@ bool isCompressedZstd(const char *data, size_t size)
 
 void decompressZstd(std::istream &is, std::ostream &os, size_t limit)
 {
+#if defined(__MINGW32__) && !defined(__MINGW64__)
+	// leaks one context per thread but doesn't crash :shrug:
+	thread_local leaky_ptr<ZSTD_DStream> stream(ZSTD_createDStream());
+#else
 	// reusing the context is recommended for performance
 	// it will destroyed when the thread ends
 	thread_local std::unique_ptr<ZSTD_DStream, ZSTD_Deleter> stream(ZSTD_createDStream());
+#endif
 
 	ZSTD_initDStream(stream.get());
 
@@ -288,6 +311,8 @@ void decompressZstd(std::istream &is, std::ostream &os, size_t limit)
 			is.read(input_buffer, bufsize);
 			input.size = is.gcount();
 			input.pos = 0;
+			if (input.size == 0)
+				throw SerializationError("decompressZstd: data ended too early");
 		}
 
 		ret = ZSTD_decompressStream(stream.get(), &output, &input);

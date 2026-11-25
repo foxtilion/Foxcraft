@@ -17,6 +17,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 
+#include "IrrCompileConfig.h"
 #include "guiChatConsole.h"
 #include "chat.h"
 #include "client/client.h"
@@ -30,17 +31,10 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "log.h"
 #include "gettext.h"
 #include <algorithm>
+#include "irrlicht_changes/CGUITTFont.h"
 #include <string>
 #ifdef HAVE_TOUCHSCREENGUI
 #include "touchscreengui_mc.h"
-#endif
-
-#if USE_FREETYPE
-	#include "irrlicht_changes/CGUITTFont.h"
-#endif
-
-#ifdef _IRR_COMPILE_WITH_SDL_DEVICE_
-#include <SDL3/SDL.h>
 #endif
 
 inline u32 clamp_u8(s32 value)
@@ -99,22 +93,23 @@ GUIChatConsole::GUIChatConsole(
 	m_fontsize.X = MYMAX(m_fontsize.X, 1);
 	m_fontsize.Y = MYMAX(m_fontsize.Y, 1);
 
-#if defined(__ANDROID__) || defined(__IOS__)
 	m_round_screen_offset = g_settings->getU16("round_screen");
-#endif
 
 	createVScrollBar();
 
 	// set default cursor options
 	setCursor(true, true, 2.0, 0.1);
+
+	m_cache_clickable_chat_weblinks = g_settings->getBool("clickable_chat_weblinks");
 }
 
 GUIChatConsole::~GUIChatConsole()
 {
 	m_chat_console = nullptr;
 
+	// The GUI environment may still hold it as the hovered element
 	removeChild(m_vscrollbar);
-	delete m_vscrollbar;
+	m_vscrollbar->drop();
 
 	RenderingEngine::stopTextInput();
 
@@ -446,14 +441,11 @@ void GUIChatConsole::drawText()
 			s32 text_size = m_font->getDimension(fragment.text.c_str()).Width;
 			core::rect<s32> destrect(x, y, x + text_size, y + m_fontsize.Y);
 			x += text_size;
-#if USE_FREETYPE
 			if (m_font->getType() == irr::gui::EGFT_CUSTOM) {
-				// Draw colored text if FreeType is enabled
-				irr::gui::CGUITTFont* tmp = dynamic_cast<irr::gui::CGUITTFont*>(m_font);
+				// Draw colored text if possible
+				gui::CGUITTFont *tmp = static_cast<gui::CGUITTFont*>(m_font);
 				tmp->draw(fragment.text, destrect, false, false, &AbsoluteClippingRect);
-			} else
-#endif
-			{
+			} else {
 				// Otherwise use standard text
 				m_font->draw(fragment.text.c_str(), destrect,
 						video::SColor(255, 255, 255, 255), false, false,
@@ -1260,13 +1252,7 @@ bool GUIChatConsole::OnEvent(const SEvent& event)
 				deletePromptSelection();
 			}
 
-			#if defined(__linux__) && (IRRLICHT_VERSION_MAJOR == 1 && IRRLICHT_VERSION_MINOR < 9)
-				wchar_t wc = L'_';
-				mbtowc( &wc, (char *) &event.KeyInput.Char, sizeof(event.KeyInput.Char) );
-				prompt.input(wc);
-			#else
-				prompt.input(event.KeyInput.Char);
-			#endif
+			prompt.input(event.KeyInput.Char);
 			calculatePromptScrollPos();
 			return true;
 		}
@@ -1303,8 +1289,19 @@ bool GUIChatConsole::OnEvent(const SEvent& event)
 			s32 rows = myround(-3.0 * event.MouseInput.Wheel);
 			m_chat_backend->scroll(rows);
 			m_vscrollbar->setPos(m_vscrollbar->getPos() + rows);
+		}
+		// Middle click or ctrl-click opens weblink, if enabled in config
+		else if (m_cache_clickable_chat_weblinks && (
+				event.MouseInput.Event == EMIE_MMOUSE_PRESSED_DOWN ||
+				(event.MouseInput.Event == EMIE_LMOUSE_PRESSED_DOWN && event.MouseInput.Control))) {
+			u32 row = m_chat_backend->getConsoleBuffer().getRows();
+			s32 prompt_y = row * m_fontsize.Y + m_height - m_desired_height;
+
+			// If clicked within console output region
+			if (event.MouseInput.Y < prompt_y)
+				middleClick(event.MouseInput.X, event.MouseInput.Y);
 		} else if (event.MouseInput.Event == EMIE_LMOUSE_PRESSED_DOWN) {
-			if (event.MouseInput.X <= m_screensize.X - m_round_screen_offset &&
+			if (event.MouseInput.X <= (s32)(m_screensize.X - m_round_screen_offset) &&
 					event.MouseInput.X >= m_round_screen_offset) {
 				u32 row = m_chat_backend->getConsoleBuffer().getRows();
 				s32 prompt_y = row * m_fontsize.Y + m_height - m_desired_height;
@@ -1483,6 +1480,13 @@ bool GUIChatConsole::OnEvent(const SEvent& event)
 			updateVScrollBar();
 		}
 	}
+#if (IRRLICHT_VERSION_MT_REVISION >= 2)
+	else if(event.EventType == EET_STRING_INPUT_EVENT)
+	{
+		prompt.input(std::wstring(event.StringInput.Str->c_str()));
+		return true;
+	}
+#endif
 
 	return Parent ? Parent->OnEvent(event) : false;
 }
@@ -1495,6 +1499,40 @@ void GUIChatConsole::setVisible(bool visible)
 	if (!visible) {
 		m_height = 0;
 		recalculateConsolePosition();
+	}
+}
+
+void GUIChatConsole::middleClick(s32 x, s32 y)
+{
+	// Prevent accidental rapid clicking
+	static u64 s_oldtime = 0;
+	u64 newtime = porting::getTimeMs();
+
+	// 0.6 seconds should suffice
+	if (newtime - s_oldtime < 600)
+		return;
+	s_oldtime = newtime;
+
+	// Identify targetted fragment, if exists
+	const ChatSelection pos = getCursorPos(x, y);
+	const std::vector<ChatFormattedFragment> &
+			frags = m_chat_backend->getConsoleBuffer().getFormattedLine(pos.row).fragments;
+	if (pos.fragment >= frags.size())
+		return;
+	const std::string &weblink = frags[pos.fragment].weblink;
+
+	// User notification
+	if (weblink.size() != 0) {
+		std::ostringstream msg;
+		msg << " * ";
+		if (porting::open_url(weblink)) {
+			msg << gettext("Opening webpage");
+		}
+		else {
+			msg << gettext("Failed to open webpage");
+		}
+		msg << " '" << weblink << "'";
+		m_chat_backend->addUnparsedMessage(utf8_to_wide(msg.str()));
 	}
 }
 

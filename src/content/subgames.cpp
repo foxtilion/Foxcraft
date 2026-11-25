@@ -24,7 +24,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "log.h"
 #include "util/strfnd.h"
 #include "defaultsettings.h" // for set_default_settings
-#include "mapgen/mapgen.h"   // for MapgenParams
+#include "map_settings_manager.h"
 #include "util/string.h"
 
 #ifndef SERVER
@@ -115,6 +115,10 @@ SubgameSpec findSubgame(const std::string &id)
 	char *mod_path = getenv("MINETEST_MODS_PATH");
 	if (mod_path && *mod_path)
 		mods_paths["cache"] = mod_path;
+
+	for (const std::string &mod_path : getEnvModPaths()) {
+		mods_paths[fs::AbsolutePath(mod_path)] = mod_path;
+	}
 
 	// Get meta
 	std::string conf_path = game_path + DIR_DELIM + "game.conf";
@@ -367,6 +371,7 @@ void loadGameConfAndInitWorld(const std::string &path, const std::string &name,
 		conf.set("backend", "sqlite3");
 		conf.set("player_backend", "sqlite3");
 		conf.set("auth_backend", "sqlite3");
+		conf.set("mod_storage_backend", "sqlite3");
 #else
 		conf.set("backend", "leveldb");
 		conf.set("player_backend", "leveldb");
@@ -383,22 +388,25 @@ void loadGameConfAndInitWorld(const std::string &path, const std::string &name,
 	// Create map_meta.txt if does not already exist
 	std::string map_meta_path = final_path + DIR_DELIM + "map_meta.txt";
 	if (!fs::PathExists(map_meta_path)) {
-		verbosestream << "Creating map_meta.txt (" << map_meta_path << ")"
-			      << std::endl;
-		std::ostringstream oss(std::ios_base::binary);
+		MapSettingsManager mgr(map_meta_path);
 
-		Settings conf;
-		MapgenParams params;
+		mgr.setMapSetting("seed", g_settings->get("fixed_map_seed"));
 
-		params.readParams(g_settings);
-		params.writeParams(&conf);
-		conf.writeLines(oss);
-		oss << "[end_of_params]\n";
-
-		fs::safeWriteToFile(map_meta_path, oss.str());
+		mgr.makeMapgenParams();
+		mgr.saveMapMeta();
 	}
 
 	// The Settings object is no longer needed for created worlds
 	if (new_game_settings)
 		delete game_settings;
+}
+
+std::vector<std::string> getEnvModPaths()
+{
+	const char *c_mod_path = getenv("MINETEST_MOD_PATH");
+	std::vector<std::string> paths;
+	Strfnd search_paths(c_mod_path ? c_mod_path : "");
+	while (!search_paths.at_end())
+		paths.push_back(search_paths.next(PATH_DELIM));
+	return paths;
 }

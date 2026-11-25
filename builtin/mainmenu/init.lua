@@ -35,7 +35,7 @@ dofile(menupath .. DIR_DELIM .. "async_event.lua")
 dofile(menupath .. DIR_DELIM .. "common.lua")
 dofile(menupath .. DIR_DELIM .. "pkgmgr.lua")
 dofile(menupath .. DIR_DELIM .. "serverlistmgr.lua")
-dofile(menupath .. DIR_DELIM .. "textures.lua")
+dofile(menupath .. DIR_DELIM .. "game_theme.lua")
 
 dofile(menupath .. DIR_DELIM .. "dlg_config_world.lua")
 dofile(menupath .. DIR_DELIM .. "dlg_settings_advanced.lua")
@@ -50,7 +50,7 @@ local tabs = {}
 
 tabs.settings = dofile(menupath .. DIR_DELIM .. "tab_settings.lua")
 tabs.content  = dofile(menupath .. DIR_DELIM .. "tab_content.lua")
-tabs.credits  = dofile(menupath .. DIR_DELIM .. "tab_credits.lua")
+tabs.about    = dofile(menupath .. DIR_DELIM .. "tab_about.lua")
 tabs.local_game = dofile(menupath .. DIR_DELIM .. "tab_local.lua")
 tabs.play_online = dofile(menupath .. DIR_DELIM .. "tab_online.lua")
 
@@ -88,7 +88,7 @@ local function init_globals()
 		core.settings:set("menu_last_game", default_game)
 	end
 
-	mm_texture.init()
+	mm_game_theme.init()
 
 	-- Create main tabview
 	local tv_main = tabview_create("maintab", {x = 12, y = 5.4}, {x = 0, y = 0})
@@ -99,7 +99,7 @@ local function init_globals()
 
 	tv_main:add(tabs.content)
 	tv_main:add(tabs.settings)
-	tv_main:add(tabs.credits)
+	tv_main:add(tabs.about)
 
 	tv_main:set_global_event_handler(main_event_handler)
 	tv_main:set_fixed_size(false)
@@ -114,7 +114,7 @@ local function init_globals()
 	if tv_main.current_tab == "local" then
 		local game = pkgmgr.find_by_gameid(core.settings:get("menu_last_game"))
 		if game == nil then
-			mm_texture.reset()
+			mm_game_theme.reset()
 		end
 	end
 
@@ -124,8 +124,6 @@ local function init_globals()
 	tv_main:show()
 
 	ui.update()
-
-	core.sound_play("main_menu", true)
 end
 
 init_globals()

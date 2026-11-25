@@ -155,6 +155,8 @@ public:
 
 	virtual void setVisible(bool visible);
 
+	virtual bool acceptsIME() { return true; }
+
 	bool hasFocus();
 
 	bool convertToMouseEvent(
@@ -179,6 +181,9 @@ private:
 	core::rect<s32> getPromptTextRect();
 	void calculatePromptScrollPos();
 	void drawPrompt();
+
+	// If clicked fragment has a web url, send it to the system default web browser
+	void middleClick(s32 x, s32 y);
 
 	ChatSelection getCursorPos(s32 x, s32 y);
 	ChatSelection getPromptCursorPos(s32 x, s32 y);
@@ -248,4 +253,7 @@ private:
 
 	u16 m_round_screen_offset = 0;
 	s32 m_hscroll_pos = 0;
+
+	// Enable clickable chat weblinks
+	bool m_cache_clickable_chat_weblinks;
 };

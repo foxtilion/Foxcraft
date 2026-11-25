@@ -161,13 +161,29 @@ public:
 	// in the subsequent iteration of Game::processPlayerInteraction
 	bool WasKeyReleased(const KeyPress &keycode) const { return keyWasReleased[keycode]; }
 
-	void listenForKey(const KeyPress &keyCode) { keysListenedFor.set(keyCode); }
-	void dontListenForKeys() { keysListenedFor.clear(); }
+	void listenForKey(const KeyPress &keyCode)
+	{
+		keysListenedFor.set(keyCode);
+	}
+	void dontListenForKeys()
+	{
+		keysListenedFor.clear();
+	}
 
 	s32 getMouseWheel()
 	{
 		s32 a = mouse_wheel;
 		mouse_wheel = 0;
+		return a;
+	}
+
+	// Returns the mouse movement since the last call and resets it.
+	// Remains valid even when the cursor is hidden and locked to the
+	// center of the window.
+	v2s32 getMouseMovement()
+	{
+		v2s32 a = mouse_movement;
+		mouse_movement = v2s32(0, 0);
 		return a;
 	}
 
@@ -179,6 +195,7 @@ public:
 		keyWasReleased.clear();
 
 		mouse_wheel = 0;
+		mouse_movement = v2s32(0, 0);
 	}
 
 	void clearWasKeyPressed()
@@ -200,8 +217,6 @@ public:
 
 	void setLastInputDevice(const SEvent &event);
 
-	s32 mouse_wheel = 0;
-
 	JoystickController *joystick = nullptr;
 
 #if defined(_IRR_COMPILE_WITH_SDL_DEVICE_)
@@ -216,6 +231,11 @@ public:
 	bool joystick_enabled = false;
 
 private:
+	s32 mouse_wheel = 0;
+
+	// Relative mouse movement accumulated from mouse events
+	v2s32 mouse_movement;
+
 	// The current state of keys
 	KeyList keyIsDown;
 
@@ -258,6 +278,9 @@ public:
 	virtual bool wasKeyReleased(GameKeyType k) = 0;
 	virtual bool cancelPressed() = 0;
 
+	virtual float getMovementSpeed() = 0;
+	virtual float getMovementDirection() = 0;
+
 	virtual void clearWasKeyPressed() {}
 	virtual void clearWasKeyReleased() {}
 
@@ -266,6 +289,8 @@ public:
 
 	virtual v2s32 getMousePos() = 0;
 	virtual void setMousePos(s32 x, s32 y) = 0;
+
+	virtual v2s32 getMouseMovement() = 0;
 
 	virtual s32 getMouseWheel() = 0;
 
@@ -308,10 +333,52 @@ public:
 	{
 		return m_receiver->WasKeyReleased(keycache.key[k]) || joystick.wasKeyReleased(k);
 	}
+
+	virtual float getMovementSpeed()
+	{
+		bool f = m_receiver->IsKeyDown(keycache.key[KeyType::FORWARD]),
+			b = m_receiver->IsKeyDown(keycache.key[KeyType::BACKWARD]),
+			l = m_receiver->IsKeyDown(keycache.key[KeyType::LEFT]),
+			r = m_receiver->IsKeyDown(keycache.key[KeyType::RIGHT]);
+		if (f || b || l || r)
+		{
+			// if contradictory keys pressed, stay still
+			if (f && b && l && r)
+				return 0.0f;
+			else if (f && b && !l && !r)
+				return 0.0f;
+			else if (!f && !b && l && r)
+				return 0.0f;
+			return 1.0f; // If there is a keyboard event, assume maximum speed
+		}
+		return joystick.getMovementSpeed();
+	}
+
+	virtual float getMovementDirection()
+	{
+		float x = 0, z = 0;
+
+		/* Check keyboard for input */
+		if (m_receiver->IsKeyDown(keycache.key[KeyType::FORWARD]))
+			z += 1;
+		if (m_receiver->IsKeyDown(keycache.key[KeyType::BACKWARD]))
+			z -= 1;
+		if (m_receiver->IsKeyDown(keycache.key[KeyType::RIGHT]))
+			x += 1;
+		if (m_receiver->IsKeyDown(keycache.key[KeyType::LEFT]))
+			x -= 1;
+
+		if (x != 0 || z != 0) /* If there is a keyboard event, it takes priority */
+			return atan2(x, z);
+		else
+			return joystick.getMovementDirection();
+	}
+
 	virtual bool cancelPressed()
 	{
 		return wasKeyDown(KeyType::ESC) || m_receiver->WasKeyDown(CancelKey);
 	}
+
 	virtual void clearWasKeyPressed()
 	{
 		m_receiver->clearWasKeyPressed();
@@ -320,17 +387,21 @@ public:
 	{
 		m_receiver->clearWasKeyReleased();
 	}
+
 	virtual void listenForKey(const KeyPress &keyCode)
 	{
 		m_receiver->listenForKey(keyCode);
 	}
-	virtual void dontListenForKeys() { m_receiver->dontListenForKeys(); }
+	virtual void dontListenForKeys()
+	{
+		m_receiver->dontListenForKeys();
+	}
+
 	virtual v2s32 getMousePos()
 	{
-		if (RenderingEngine::get_raw_device()->getCursorControl()) {
-			return RenderingEngine::get_raw_device()
-					->getCursorControl()
-					->getPosition();
+		auto control = RenderingEngine::get_raw_device()->getCursorControl();
+		if (control) {
+			return control->getPosition();
 		}
 
 		return m_mousepos;
@@ -338,16 +409,23 @@ public:
 
 	virtual void setMousePos(s32 x, s32 y)
 	{
-		if (RenderingEngine::get_raw_device()->getCursorControl()) {
-			RenderingEngine::get_raw_device()
-					->getCursorControl()
-					->setPosition(x, y);
+		auto control = RenderingEngine::get_raw_device()->getCursorControl();
+		if (control) {
+			control->setPosition(x, y);
 		} else {
 			m_mousepos = v2s32(x, y);
 		}
 	}
 
-	virtual s32 getMouseWheel() { return m_receiver->getMouseWheel(); }
+	virtual v2s32 getMouseMovement()
+	{
+		return m_receiver->getMouseMovement();
+	}
+
+	virtual s32 getMouseWheel()
+	{
+		return m_receiver->getMouseWheel();
+	}
 
 	virtual void setCursorVisible(bool visible)
 	{
@@ -368,6 +446,9 @@ public:
 	void clear()
 	{
 		joystick.clear();
+#if defined(_IRR_COMPILE_WITH_SDL_DEVICE_)
+		sdl_game_controller.clearMovement();
+#endif
 		m_receiver->clearInput();
 	}
 
@@ -397,8 +478,17 @@ public:
 	virtual bool wasKeyPressed(GameKeyType k) { return false; }
 	virtual bool wasKeyReleased(GameKeyType k) { return false; }
 	virtual bool cancelPressed() { return false; }
+	virtual float getMovementSpeed() { return movementSpeed; }
+	virtual float getMovementDirection() { return movementDirection; }
 	virtual v2s32 getMousePos() { return mousepos; }
 	virtual void setMousePos(s32 x, s32 y) { mousepos = v2s32(x, y); }
+
+	virtual v2s32 getMouseMovement()
+	{
+		v2s32 a = mousemovement;
+		mousemovement = v2s32(0, 0);
+		return a;
+	}
 
 	virtual s32 getMouseWheel() { return 0; }
 
@@ -410,4 +500,7 @@ private:
 	KeyList keydown;
 	v2s32 mousepos;
 	v2s32 mousespeed;
+	v2s32 mousemovement;
+	float movementSpeed;
+	float movementDirection;
 };

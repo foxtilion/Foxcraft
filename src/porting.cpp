@@ -35,6 +35,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 	#include <algorithm>
 	#include <shlwapi.h>
 	#include <shellapi.h>
+	#include <mmsystem.h>
 #endif
 #if !defined(_WIN32)
 	#include <unistd.h>
@@ -79,6 +80,15 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <cstdarg>
 #include <cstdio>
 
+#if !defined(SERVER) && defined(_WIN32)
+// On Windows export some driver-specific variables to encourage Minetest to be
+// executed on the discrete GPU in case of systems with two. Portability is fun.
+extern "C" {
+	__declspec(dllexport) DWORD NvOptimusEnablement = 1;
+	__declspec(dllexport) DWORD AmdPowerXpressRequestHighPerformance = 1;
+}
+#endif
+
 namespace porting
 {
 
@@ -121,16 +131,25 @@ void signal_handler(int sig)
 		(void)!write(g_signal_pipe[1], &byte, 1);
 		g_killed = true;
 	} else {
+		// If it happens again, defer to the default action.
 		(void)signal(sig, SIG_DFL);
 	}
 }
 
-void signal_handler_init(void)
+void signal_handler_init()
 {
 	if (pipe(g_signal_pipe) == 0)
 		std::thread(signal_thread).detach();
 	(void)signal(SIGINT, signal_handler);
 	(void)signal(SIGTERM, signal_handler);
+
+	/*
+	 * Writing to a closed pipe or socket must not kill the entire process.
+	 * Code should handle write failures directly where relevant.
+	 * If we're unlucky the user's desktop environment might even connect std::cout
+	 * to a closed pipe (see issue #17366) and there's nothing we can do about it...
+	 */
+	(void)signal(SIGPIPE, SIG_IGN);
 }
 
 #else // _WIN32
@@ -149,7 +168,8 @@ BOOL WINAPI event_handler(DWORD sig)
 				" shutting down." << std::endl;
 			g_killed = true;
 		} else {
-			(void)signal(SIGINT, SIG_DFL);
+			// If it happens again, defer to the default action.
+			SetConsoleCtrlHandler(NULL, FALSE);
 		}
 		break;
 	case CTRL_BREAK_EVENT:
@@ -159,7 +179,7 @@ BOOL WINAPI event_handler(DWORD sig)
 	return TRUE;
 }
 
-void signal_handler_init(void)
+void signal_handler_init()
 {
 	SetConsoleCtrlHandler((PHANDLER_ROUTINE)event_handler, TRUE);
 }
@@ -831,6 +851,9 @@ bool open_directory(const std::string &path)
 
 inline double get_perf_freq()
 {
+	// Also use this opportunity to enable high-res timers
+	timeBeginPeriod(1);
+
 	LARGE_INTEGER freq;
 	QueryPerformanceFrequency(&freq);
 	return freq.QuadPart;

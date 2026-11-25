@@ -140,7 +140,7 @@ public:
 	//// Flags
 	////
 
-	inline bool isDummy()
+	inline bool isDummy() const
 	{
 		return !data;
 	}
@@ -362,20 +362,6 @@ public:
 			actuallyUpdateDayNightDiff();
 		return m_day_night_differs;
 	}
-
-	////
-	//// Miscellaneous stuff
-	////
-
-	/*
-		Tries to measure ground level.
-		Return value:
-			-1 = only air
-			-2 = only ground
-			-3 = random fail
-			0...MAP_BLOCKSIZE-1 = ground level
-	*/
-	s16 getGroundLevel(v2s16 p2d);
 
 	////
 	//// Timestamp (see m_timestamp)
@@ -615,7 +601,7 @@ typedef std::vector<MapBlock*> MapBlockVect;
 
 inline bool objectpos_over_limit(v3f p)
 {
-	const float max_limit_bs = MAX_MAP_GENERATION_LIMIT * BS;
+	const float max_limit_bs = (MAX_MAP_GENERATION_LIMIT + 0.5f) * BS;
 	return p.X < -max_limit_bs ||
 		p.X >  max_limit_bs ||
 		p.Y < -max_limit_bs ||

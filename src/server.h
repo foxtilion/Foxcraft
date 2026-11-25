@@ -43,6 +43,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <list>
 #include <map>
 #include <vector>
+#include <unordered_set>
 
 class ChatEvent;
 struct ChatEventChat;
@@ -73,6 +74,9 @@ struct StarParams;
 class ServerThread;
 class ServerModManager;
 class ServerInventoryManager;
+namespace con {
+struct LocalLink;
+}
 
 enum ClientDeletionReason {
 	CDR_LEAVE,
@@ -83,8 +87,8 @@ enum ClientDeletionReason {
 struct MediaInfo
 {
 	std::string path;
-	std::string sha1_digest;
-	bool no_announce;
+	std::string sha1_digest; // base64-encoded
+	bool no_announce; // true: not announced in TOCLIENT_ANNOUNCE_MEDIA (at player join)
 
 	MediaInfo(const std::string &path_="",
 	          const std::string &sha1_digest_=""):
@@ -202,6 +206,7 @@ public:
 	void handleCommand_FirstSrp(NetworkPacket* pkt);
 	void handleCommand_SrpBytesA(NetworkPacket* pkt);
 	void handleCommand_SrpBytesM(NetworkPacket* pkt);
+	void handleCommand_HaveMedia(NetworkPacket *pkt);
 
 	void ProcessData(NetworkPacket *pkt);
 
@@ -262,8 +267,8 @@ public:
 
 	void deleteParticleSpawner(const std::string &playername, u32 id);
 
-	bool dynamicAddMedia(const std::string &filepath, bool client_cache,
-			std::vector<RemotePlayer*> &sent_to);
+	bool dynamicAddMedia(std::string filepath, u32 token,
+		const std::string &to_player, bool ephemeral, bool client_cache);
 	void dynamicRemoveMedia(const std::string &filename);
 	bool addMediaFile(const std::string &filename, const std::string &filepath,
 			std::string *filedata = nullptr, std::string *digest = nullptr);
@@ -289,6 +294,7 @@ public:
 	virtual u16 allocateUnknownNodeId(const std::string &name);
 	IRollbackManager *getRollbackManager() { return m_rollback; }
 	virtual EmergeManager *getEmergeManager() { return m_emerge; }
+	virtual ModMetadataDatabase *getModStorageDatabase() { return m_mod_storage_database; }
 
 	IWritableItemDefManager* getWritableItemDefManager();
 	NodeDefManager* getWritableNodeDefManager();
@@ -299,13 +305,18 @@ public:
 	void getModNames(std::vector<std::string> &modlist);
 	std::string getBuiltinLuaPath();
 	virtual std::string getWorldPath() const { return m_path_world; }
-	virtual std::string getModStoragePath() const;
 
 	inline bool isSingleplayer()
 			{ return m_simple_singleplayer_mode; }
 
+	std::shared_ptr<con::LocalLink> getLocalLink() const { return m_local_link; }
+
 	inline void setAsyncFatalError(const std::string &error)
 			{ m_async_fatal_error.set(error); }
+	inline void setAsyncFatalError(const LuaError &e)
+	{
+		setAsyncFatalError(std::string("Lua: ") + e.what());
+	}
 
 	bool showFormspec(const char *name, const std::string &formspec, const std::string &formname);
 	Map & getMap() { return m_env->getMap(); }
@@ -350,7 +361,8 @@ public:
 
 	void printToConsoleOnly(const std::string &text);
 
-	void SendPlayerHPOrDie(PlayerSAO *player, const PlayerHPChangeReason &reason);
+	void HandlePlayerHPChange(PlayerSAO *sao, const PlayerHPChangeReason &reason);
+	void SendPlayerHP(PlayerSAO *sao);
 	void SendPlayerBreath(PlayerSAO *sao);
 	void SendInventory(PlayerSAO *playerSAO, bool incremental);
 	void SendMovePlayer(session_t peer_id);
@@ -381,6 +393,14 @@ public:
 	// map key = binary sha1, map value = file path
 	std::unordered_map<std::string, std::string> getMediaList();
 
+	static ModMetadataDatabase *openModStorageDatabase(const std::string &world_path);
+
+	static ModMetadataDatabase *openModStorageDatabase(const std::string &backend,
+			const std::string &world_path, const Settings &world_mt);
+
+	static bool migrateModStorageDatabase(const GameParams &game_params,
+			const Settings &cmd_args);
+
 	// Bind address
 	Address m_bind_addr;
 
@@ -408,6 +428,12 @@ private:
 			float m_timer = 0.0f;
 	};
 
+	struct PendingDynamicMediaCallback {
+		std::string filename; // only set if media entry and file is to be deleted
+		float expiry_timer;
+		std::unordered_set<session_t> waiting_players;
+	};
+
 	void init();
 
 	void SendMovement(session_t peer_id);
@@ -428,7 +454,6 @@ private:
 
 	virtual void SendChatMessage(session_t peer_id, const ChatMessage &message);
 	void SendTimeOfDay(session_t peer_id, u16 time, f32 time_speed);
-	void SendPlayerHP(session_t peer_id);
 
 	void SendLocalPlayerAnimations(session_t peer_id, v2s32 animation_frames[4],
 		f32 animation_speed);
@@ -477,6 +502,7 @@ private:
 	void sendMediaAnnouncement(session_t peer_id, const std::string &lang_code);
 	void sendRequestedMedia(session_t peer_id,
 			const std::vector<std::string> &tosend);
+	void stepPendingDynMediaCallbacks(float dtime);
 
 	// Adds a ParticleSpawner on peer with peer_id (PEER_ID_INEXISTENT == all)
 	void SendAddParticleSpawner(session_t peer_id, u16 protocol_version,
@@ -497,7 +523,7 @@ private:
 		Something random
 	*/
 
-	void DiePlayer(session_t peer_id, const PlayerHPChangeReason &reason);
+	void HandlePlayerDeath(PlayerSAO* sao, const PlayerHPChangeReason &reason);
 	void RespawnPlayer(session_t peer_id);
 	void DeleteClient(session_t peer_id, ClientDeletionReason reason);
 	void UpdateCrafting(RemotePlayer *player);
@@ -563,6 +589,7 @@ private:
 	ServerMap *m_startup_server_map = nullptr;
 
 	// server connection
+	std::shared_ptr<con::LocalLink> m_local_link;
 	std::shared_ptr<con::Connection> m_con;
 
 #if BAN_MANAGER
@@ -663,6 +690,10 @@ private:
 	// media files known to server
 	std::unordered_map<std::string, MediaInfo> m_media;
 
+	// pending dynamic media callbacks, clients inform the server when they have a file fetched
+	std::unordered_map<u32, PendingDynamicMediaCallback> m_pending_dyn_media;
+	float m_step_pending_dyn_media_timer = 0.0f;
+
 	/*
 		Sounds
 	*/
@@ -671,6 +702,7 @@ private:
 	s32 nextSoundId();
 
 	std::unordered_map<std::string, ModMetadata *> m_mod_storages;
+	ModMetadataDatabase *m_mod_storage_database = nullptr;
 	float m_mod_storage_save_timer = 10.0f;
 
 	// CSM restrictions byteflag

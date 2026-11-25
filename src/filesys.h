@@ -19,6 +19,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #pragma once
 
+#include <cstdint>
 #include <set>
 #include <string>
 #include <vector>
@@ -60,6 +61,9 @@ bool IsPathAbsolute(const std::string &path);
 
 bool IsDir(const std::string &path);
 
+// Size of a regular file, found without opening it
+bool GetFileSize(const std::string &path, std::uint64_t &size);
+
 bool IsDirDelimiter(char c);
 
 // Only pass full paths to this one. True on success.
@@ -70,6 +74,10 @@ bool DeleteSingleFileOrEmptyDirectory(const std::string &path);
 
 // Returns path to temp directory, can return "" on error
 std::string TempPath();
+
+// Returns path to securely-created temporary file (will already exist when this function returns)
+// can return "" on error
+std::string CreateTempFile();
 
 /* Returns a list of subdirectories, including the path itself, but excluding
        hidden directories (whose names start with . or _)
@@ -101,6 +109,10 @@ bool CopyFileContents(const std::string &source, const std::string &target);
 // Copy directory and all subdirectories
 // Omits files and subdirectories that start with a period
 bool CopyDir(const std::string &source, const std::string &target);
+
+// Move directory and all subdirectories
+// Behavior with files/subdirs that start with a period is undefined
+bool MoveDir(const std::string &source, const std::string &target);
 
 // Check if one path is prefix of another
 // For example, "/tmp" is a prefix of "/tmp" and "/tmp/file" but not "/tmp2"

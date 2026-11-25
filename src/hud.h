@@ -34,6 +34,10 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define HUD_CORNER_LOWER  1
 #define HUD_CORNER_CENTER 2
 
+#define HUD_STYLE_BOLD   1
+#define HUD_STYLE_ITALIC 2
+#define HUD_STYLE_MONO   4
+
 // Note that these visibility flags do not determine if the hud items are
 // actually drawn, but rather, whether to draw the item should the rest
 // of the game state permit it.
@@ -66,13 +70,15 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define HOTBAR_SCREEN_SHARE 0.054f
 
 // Largest hud_scaling the screen has room for
-inline float getAutoHudScaling(v2u32 screen_size, float display_density)
+// shifted_joystick: the joystick moves away from the corners of a round screen
+inline float getAutoHudScaling(v2u32 screen_size, float display_density,
+		bool shifted_joystick)
 {
 #ifdef HAVE_TOUCHSCREENGUI
 	// half the widest hotbar a game may ask for, and the joystick, in unscaled pixels
 	const float hotbar = HUD_HOTBAR_ITEMCOUNT_MAX * HOTBAR_IMAGE_SIZE * 7 / 12.0f;
-	// the joystick reaches 4.8 button sizes in once shifted on a round screen
-	const float joystick = TOUCH_BUTTON_SIZE * 4.8f;
+	// the joystick reaches 4.5 button sizes in, 4.8 once shifted
+	const float joystick = TOUCH_BUTTON_SIZE * (shifted_joystick ? 4.8f : 4.5f);
 
 	return rangelim(screen_size.X / (2.0f * display_density * (hotbar + joystick)),
 			0.5f, 1.0f);
@@ -140,6 +146,7 @@ struct HudElement {
 	v2s32 size;
 	s16 z_index = 0;
 	std::string text2;
+	u32 style;
 	bool unhideable = false;
 	bool touch_only = false;
 };

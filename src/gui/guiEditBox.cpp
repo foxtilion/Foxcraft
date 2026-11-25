@@ -19,6 +19,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #include "guiEditBox.h"
 
+#include "IrrCompileConfig.h"
 #include "IGUISkin.h"
 #include "IGUIEnvironment.h"
 #include "IGUIFont.h"
@@ -138,6 +139,16 @@ void GUIEditBox::setText(const wchar_t *text)
 	breakText();
 }
 
+void GUIEditBox::setCursor(const Cursor &cursor)
+{
+	s32 size = Text.size();
+	m_cursor_pos = core::clamp(cursor.pos, 0, size);
+	setTextMarkers(core::clamp(cursor.mark_begin, 0, size),
+			core::clamp(cursor.mark_end, 0, size));
+	m_blink_start_time = porting::getTimeMs();
+	calculateScrollPos();
+}
+
 //! Sets the maximum amount of characters which may be entered in the box.
 //! \param max: Maximum amount of characters. If 0, the character amount is
 //! infinity.
@@ -228,43 +239,26 @@ bool GUIEditBox::OnEvent(const SEvent &event)
 					core::stringw text = utf8_to_stringw(
 							event.SDLTextEvent.Text);
 
-					for (size_t i = 0; i < text.size(); i++)
-						inputChar(text[i]);
+					inputString(text);
 				}
 
 				return true;
 			}
 			break;
 #endif
-		case EET_KEY_INPUT_EVENT: {
-#if (defined(__linux__) || defined(__FreeBSD__)) || defined(__DragonFly__)
-			// ################################################################
-			// ValkaTR:
-			// This part is the difference from the original intlGUIEditBox
-			// It converts UTF-8 character into a UCS-2 (wchar_t)
-			wchar_t wc = L'_';
-			mbtowc(&wc, (char *)&event.KeyInput.Char,
-					sizeof(event.KeyInput.Char));
-
-			// printf( "char: %lc (%u)  \r\n", wc, wc );
-
-			SEvent irrevent(event);
-			irrevent.KeyInput.Char = wc;
-			// ################################################################
-
-			if (processKey(irrevent))
-				return true;
-#else
+		case EET_KEY_INPUT_EVENT:
 			if (processKey(event))
 				return true;
-#endif // defined(linux)
-
 			break;
-		}
 		case EET_MOUSE_INPUT_EVENT:
 			if (processMouse(event))
 				return true;
 			break;
+#if (IRRLICHT_VERSION_MT_REVISION >= 2)
+		case EET_STRING_INPUT_EVENT:
+			inputString(*event.StringInput.Str);
+			return true;
+#endif
 #if defined(__ANDROID__) || defined(__IOS__)
 		case EET_TOUCH_INPUT_EVENT:
 			if (event.TouchInput.Event == irr::ETIE_PRESSED_LONG) {
@@ -607,6 +601,9 @@ bool GUIEditBox::onKeyControlX(const SEvent &event, s32 &mark_begin, s32 &mark_e
 	// First copy to clipboard
 	onKeyControlC(event);
 
+	if (!m_writable)
+		return false;
+
 	if (m_passwordbox || !m_operator || m_mark_begin == m_mark_end)
 		return false;
 
@@ -629,7 +626,7 @@ bool GUIEditBox::onKeyControlX(const SEvent &event, s32 &mark_begin, s32 &mark_e
 
 bool GUIEditBox::onKeyControlV(const SEvent &event, s32 &mark_begin, s32 &mark_end)
 {
-	if (!isEnabled())
+	if (!isEnabled() || !m_writable)
 		return false;
 
 	// paste from the clipboard
@@ -672,7 +669,7 @@ bool GUIEditBox::onKeyControlV(const SEvent &event, s32 &mark_begin, s32 &mark_e
 
 bool GUIEditBox::onKeyBack(const SEvent &event, s32 &mark_begin, s32 &mark_end)
 {
-	if (!isEnabled() || Text.empty())
+	if (!isEnabled() || Text.empty() || !m_writable)
 		return false;
 
 	core::stringw s;
@@ -709,7 +706,7 @@ bool GUIEditBox::onKeyBack(const SEvent &event, s32 &mark_begin, s32 &mark_end)
 
 bool GUIEditBox::onKeyDelete(const SEvent &event, s32 &mark_begin, s32 &mark_end)
 {
-	if (!isEnabled() || Text.empty())
+	if (!isEnabled() || Text.empty() || !m_writable)
 		return false;
 
 	core::stringw s;
@@ -744,36 +741,41 @@ bool GUIEditBox::onKeyDelete(const SEvent &event, s32 &mark_begin, s32 &mark_end
 
 void GUIEditBox::inputChar(wchar_t c)
 {
+	if (c == 0)
+		return;
+	core::stringw s(&c, 1);
+	inputString(s);
+}
+
+void GUIEditBox::inputString(const core::stringw &str)
+{
 	if (!isEnabled() || !m_writable)
 		return;
 
-	if (c != 0) {
-		if (Text.size() < m_max || m_max == 0) {
-			core::stringw s;
-
-			if (m_mark_begin != m_mark_end) {
-				// clang-format off
-				// replace marked text
-				s = Text.subString(0, m_real_mark_begin);
-				s.append(c);
-				s.append(Text.subString(m_real_mark_end, Text.size() - m_real_mark_end));
-				Text = s;
-				m_cursor_pos = m_real_mark_begin + 1;
-				// clang-format on
-			} else {
-				// add new character
-				s = Text.subString(0, m_cursor_pos);
-				s.append(c);
-				s.append(Text.subString(m_cursor_pos,
-						Text.size() - m_cursor_pos));
-				Text = s;
-				++m_cursor_pos;
-			}
-
-			m_blink_start_time = porting::getTimeMs();
-			setTextMarkers(0, 0);
+	u32 len = str.size();
+	if (Text.size()+len <= m_max || m_max == 0) {
+		core::stringw s;
+		if (m_mark_begin != m_mark_end) {
+			// replace marked text
+			s = Text.subString(0, m_real_mark_begin);
+			s.append(str);
+			s.append(Text.subString(m_real_mark_end, Text.size() - m_real_mark_end));
+			Text = s;
+			m_cursor_pos = m_real_mark_begin + len;
+		} else {
+			// append string
+			s = Text.subString(0, m_cursor_pos);
+			s.append(str);
+			s.append(Text.subString(m_cursor_pos,
+					Text.size() - m_cursor_pos));
+			Text = s;
+			m_cursor_pos += len;
 		}
+
+		m_blink_start_time = porting::getTimeMs();
+		setTextMarkers(0, 0);
 	}
+
 	breakText();
 	sendGuiEvent(EGET_EDITBOX_CHANGED);
 	calculateScrollPos();
@@ -957,55 +959,4 @@ void GUIEditBox::updateVScrollBar()
 			m_vscrollbar->setPageSize(s32(getTextDimension().Height));
 		}
 	}
-}
-
-void GUIEditBox::deserializeAttributes(
-		io::IAttributes *in, io::SAttributeReadWriteOptions *options = 0)
-{
-	IGUIEditBox::deserializeAttributes(in, options);
-
-	setOverrideColor(in->getAttributeAsColor("OverrideColor"));
-	enableOverrideColor(in->getAttributeAsBool("OverrideColorEnabled"));
-	setMax(in->getAttributeAsInt("MaxChars"));
-	setWordWrap(in->getAttributeAsBool("WordWrap"));
-	setMultiLine(in->getAttributeAsBool("MultiLine"));
-	setAutoScroll(in->getAttributeAsBool("AutoScroll"));
-	core::stringw ch = in->getAttributeAsStringW("PasswordChar");
-
-	if (ch.empty())
-		setPasswordBox(in->getAttributeAsBool("PasswordBox"));
-	else
-		setPasswordBox(in->getAttributeAsBool("PasswordBox"), ch[0]);
-
-	setTextAlignment((EGUI_ALIGNMENT)in->getAttributeAsEnumeration(
-					 "HTextAlign", GUIAlignmentNames),
-			(EGUI_ALIGNMENT)in->getAttributeAsEnumeration(
-					"VTextAlign", GUIAlignmentNames));
-
-	setWritable(in->getAttributeAsBool("Writable"));
-	// setOverrideFont(in->getAttributeAsFont("OverrideFont"));
-}
-
-//! Writes attributes of the element.
-void GUIEditBox::serializeAttributes(
-		io::IAttributes *out, io::SAttributeReadWriteOptions *options = 0) const
-{
-	// IGUIEditBox::serializeAttributes(out,options);
-
-	out->addBool("OverrideColorEnabled", m_override_color_enabled);
-	out->addColor("OverrideColor", m_override_color);
-	// out->addFont("OverrideFont",m_override_font);
-	out->addInt("MaxChars", m_max);
-	out->addBool("WordWrap", m_word_wrap);
-	out->addBool("MultiLine", m_multiline);
-	out->addBool("AutoScroll", m_autoscroll);
-	out->addBool("PasswordBox", m_passwordbox);
-	core::stringw ch = L" ";
-	ch[0] = m_passwordchar;
-	out->addString("PasswordChar", ch.c_str());
-	out->addEnum("HTextAlign", m_halign, GUIAlignmentNames);
-	out->addEnum("VTextAlign", m_valign, GUIAlignmentNames);
-	out->addBool("Writable", m_writable);
-
-	IGUIEditBox::serializeAttributes(out, options);
 }

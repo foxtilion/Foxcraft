@@ -8,8 +8,8 @@ echo "Build libraries:"
 
 ./scripts/libSDL.sh
 ./scripts/libpng.sh
-./scripts/angle.sh
 ./scripts/irrlicht.sh
+./scripts/shaders.sh
 ./scripts/gettext.sh
 ./scripts/freetype.sh bootstrap
 ./scripts/harfbuzz.sh
@@ -17,8 +17,7 @@ echo "Build libraries:"
 ./scripts/leveldb.sh
 ./scripts/nghttp2.sh
 ./scripts/libcurl.sh
-./scripts/libogg.sh
-./scripts/libvorbis.sh
+./scripts/libnogg.sh
 ./scripts/luajit.sh
 ./scripts/openal.sh
 

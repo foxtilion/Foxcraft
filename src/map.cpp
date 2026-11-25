@@ -142,13 +142,6 @@ MapBlock * Map::getBlockNoCreate(v3s16 p3d)
 	return block;
 }
 
-bool Map::isNodeUnderground(v3s16 p)
-{
-	v3s16 blockpos = getNodeBlockPos(p);
-	MapBlock *block = getBlockNoCreateNoEx(blockpos);
-	return block && block->getIsUnderground();
-}
-
 bool Map::isValidPosition(v3s16 p)
 {
 	v3s16 blockpos = getNodeBlockPos(p);
@@ -868,7 +861,7 @@ void Map::transformLiquids(std::map<v3s16, MapBlock*> &modified_blocks,
 		m_transforming_liquid.push_back(iter);
 
 	voxalgo::update_lighting_nodes(this, changed_nodes, modified_blocks);
-
+	env->getScriptIface()->on_liquid_transformed(changed_nodes);
 
 	/* ----------------------------------------------------------------------
 	 * Manage the queue so that it does not grow indefinately
@@ -1143,19 +1136,29 @@ bool Map::isOccluded(const v3s16 &pos_camera, const v3s16 &pos_target,
 	v3f pos_origin_f = intToFloat(pos_camera, BS);
 	u32 count = 0;
 	bool is_valid_position;
+	// Steps of 1-2 nodes mostly stay in one block: look it up only when a step leaves it
+	v3s16 block_pos(S16_MIN, S16_MIN, S16_MIN);
+	MapBlock *block = nullptr;
 
 	for (; offset < distance + end_offset; offset += step) {
 		v3f pos_node_f = pos_origin_f + direction * offset;
 		v3s16 pos_node = floatToInt(pos_node_f, BS);
 
-		MapNode node = getNode(pos_node, &is_valid_position);
-
-		if (is_valid_position &&
-				!m_nodedef->get(node).light_propagates) {
-			// Cannot see through light-blocking nodes --> occluded
-			count++;
-			if (count >= needed_count)
-				return true;
+		const v3s16 pos_block = getNodeBlockPos(pos_node);
+		if (pos_block != block_pos) {
+			block_pos = pos_block;
+			block = getBlockNoCreateNoEx(pos_block);
+		}
+		if (block) {
+			MapNode node = block->getNodeNoCheck(pos_node - pos_block * MAP_BLOCKSIZE,
+				&is_valid_position);
+			if (is_valid_position &&
+					!m_nodedef->get(node).light_propagates) {
+				// Cannot see through light-blocking nodes --> occluded
+				count++;
+				if (count >= needed_count)
+					return true;
+			}
 		}
 		step *= stepfac;
 	}
@@ -1496,11 +1499,7 @@ MapSector *ServerMap::createSector(v2s16 p2d)
 	/*
 		Do not create over max mapgen limit
 	*/
-	const s16 max_limit_bp = MAX_MAP_GENERATION_LIMIT / MAP_BLOCKSIZE;
-	if (p2d.X < -max_limit_bp ||
-			p2d.X >  max_limit_bp ||
-			p2d.Y < -max_limit_bp ||
-			p2d.Y >  max_limit_bp)
+	if (blockpos_over_max_limit(v3s16(p2d.X, 0, p2d.Y)))
 		throw InvalidPositionException("createSector(): pos. over max mapgen limit");
 
 	/*
@@ -1508,9 +1507,6 @@ MapSector *ServerMap::createSector(v2s16 p2d)
 	*/
 
 	sector = new MapSector(this, p2d, m_gamedef);
-
-	// Sector position on map in nodes
-	//v2s16 nodepos2d = p2d * MAP_BLOCKSIZE;
 
 	/*
 		Insert to container
@@ -1592,6 +1588,11 @@ MapBlock *ServerMap::getBlockOrEmerge(v3s16 p3d)
 		m_emerge->enqueueBlockEmerge(PEER_ID_INEXISTENT, p3d, false);
 
 	return block;
+}
+
+bool ServerMap::isBlockInQueue(v3s16 pos)
+{
+	return m_emerge && m_emerge->isBlockInQueue(pos);
 }
 
 // N.B.  This requires no synchronization, since data will not be modified unless
@@ -1827,6 +1828,10 @@ void ServerMap::loadBlock(std::string *blob, v3s16 p3d, MapSector *sector, bool 
 
 		// We just loaded it from, so it's up-to-date.
 		block->resetModified();
+
+		// An older format is saved once in the newest one: smaller and faster to read
+		if (version < SER_FMT_VER_HIGHEST_WRITE)
+			block->raiseModified(MOD_STATE_WRITE_NEEDED);
 	}
 	catch(SerializationError &e)
 	{

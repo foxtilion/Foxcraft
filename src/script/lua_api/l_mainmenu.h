@@ -122,6 +122,8 @@ private:
 
 	static int l_get_modpath(lua_State *L);
 
+	static int l_get_modpaths(lua_State *L);
+
 	static int l_get_clientmodpath(lua_State *L);
 
 	static int l_get_gamepath(lua_State *L);
@@ -148,6 +150,8 @@ private:
 
 	static int l_file_exists(lua_State *L);
 
+	static int l_get_file_size(lua_State *L);
+
 	static int l_extract_zip(lua_State *L);
 
 	static int l_may_modify_path(lua_State *L);
@@ -159,8 +163,6 @@ private:
 	static int l_get_video_drivers(lua_State *L);
 
 	static int l_get_active_driver(lua_State *L);
-
-	static int l_get_video_modes(lua_State *L);
 
 	//version compatibility
 	static int l_get_min_supp_proto(lua_State *L);

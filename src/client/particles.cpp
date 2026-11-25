@@ -128,7 +128,7 @@ ParticleFrameView::ParticleFrameView(ClientEnvironment *env)
 	// the previous frame
 	has_cone = false;
 	const scene::ICameraSceneNode *camera =
-		RenderingEngine::get_scene_manager()->getActiveCamera();
+		env->getGameDef()->getSceneManager()->getActiveCamera();
 	if (camera) {
 		view_pos = camera->getAbsolutePosition();
 		view_dir = camera->getTarget() - view_pos;
@@ -241,6 +241,8 @@ void Particle::updateLight()
 		light = blend_light(m_env->getDayNightRatio(), LIGHT_SUN, 0);
 
 	u8 m_light = decode_light(light + m_glow);
+	if (u8 point = m_env->getPointLightLevel(m_pos * BS))
+		m_light = MYMAX(m_light, decode_light(point + m_glow));
 	m_color.set(255,
 		m_light * m_base_color.getRed() / 255,
 		m_light * m_base_color.getGreen() / 255,
@@ -465,8 +467,8 @@ static constexpr u16 quad_indices[] = { 0, 1, 2, 2, 3, 0 };
 ParticleBuffer::ParticleBuffer(ClientEnvironment *env,
 	const video::SMaterial &material
 ):
-	scene::ISceneNode(RenderingEngine::get_scene_manager()->getRootSceneNode(),
-		RenderingEngine::get_scene_manager()),
+	scene::ISceneNode(env->getGameDef()->getSceneManager()->getRootSceneNode(),
+		env->getGameDef()->getSceneManager()),
 	m_mesh_buffer(make_irr<scene::SMeshBuffer>())
 {
 	m_mesh_buffer->getMaterial() = material;

@@ -30,7 +30,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 // Menu clouds are created later
 class Clouds;
 Clouds *g_menuclouds = NULL;
-irr::scene::ISceneManager *g_menucloudsmgr = NULL;
+scene::ISceneManager *g_menucloudsmgr = NULL;
 
 // Constant for now
 static constexpr const float cloud_size = BS * 64.0f;
@@ -308,12 +308,12 @@ void Clouds::update(const v3f &camera_p, const video::SColorf &color_diffuse)
 	// is the camera inside the cloud mesh?
 	m_camera_inside_cloud = false; // default
 	if (m_enable_3d) {
-		float camera_height = camera_p.Y;
+		float camera_height = camera_p.Y - BS * m_camera_offset.Y;
 		if (camera_height >= m_box.MinEdge.Y &&
 				camera_height <= m_box.MaxEdge.Y) {
 			v2f camera_in_noise;
-			camera_in_noise.X = floor((camera_p.X - m_origin.X) / cloud_size + 0.5);
-			camera_in_noise.Y = floor((camera_p.Z - m_origin.Y) / cloud_size + 0.5);
+			camera_in_noise.X = floor((camera_p.X - m_origin.X) / cloud_size);
+			camera_in_noise.Y = floor((camera_p.Z - m_origin.Y) / cloud_size);
 			bool filled = gridFilled(camera_in_noise.X, camera_in_noise.Y);
 			m_camera_inside_cloud = filled;
 		}

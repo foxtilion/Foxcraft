@@ -112,6 +112,12 @@ public:
 	//! Sets the new caption of this element.
 	virtual void setText(const wchar_t *text);
 
+	struct Cursor { s32 pos = 0, mark_begin = 0, mark_end = 0; };
+
+	//! The cursor and the selection, to show the same text anew with them
+	Cursor getCursor() const { return {m_cursor_pos, m_mark_begin, m_mark_end}; }
+	void setCursor(const Cursor &cursor);
+
 	//! Sets the maximum amount of characters which may be entered in the box.
 	//! \param max: Maximum amount of characters. If 0, the character amount is
 	//! infinity.
@@ -130,20 +136,14 @@ public:
 	//! called if an event happened.
 	virtual bool OnEvent(const SEvent &event);
 
-	//! Writes attributes of the element.
-	virtual void serializeAttributes(io::IAttributes *out,
-			io::SAttributeReadWriteOptions *options) const;
-
-	//! Reads attributes of the element
-	virtual void deserializeAttributes(
-			io::IAttributes *in, io::SAttributeReadWriteOptions *options);
-
 	//! Sets the scrollbar texture
 	void setScrollbarStyle(const StyleSpec &style, ISimpleTextureSource *tsrc)
 	{
 		if (m_vscrollbar != nullptr)
 			m_vscrollbar->setStyle(style, tsrc);
 	}
+
+	virtual bool acceptsIME() { return isEnabled() && m_writable; };
 
 protected:
 	virtual void breakText() = 0;
@@ -163,6 +163,7 @@ protected:
 	virtual s32 getCursorPos(s32 x, s32 y) = 0;
 
 	bool processKey(const SEvent &event);
+	virtual void inputString(const core::stringw &str);
 	virtual void inputChar(wchar_t c);
 
 	//! returns the line number that the cursor is on

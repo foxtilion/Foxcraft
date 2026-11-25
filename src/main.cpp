@@ -28,7 +28,6 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "server.h"
 #include "filesys.h"
 #include "version.h"
-#include "client/game.h"
 #include "defaultsettings.h"
 #include "gettext.h"
 #include "log.h"
@@ -45,6 +44,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 	#include "terminal_chat_console.h"
 #endif
 #ifndef SERVER
+#include "client/game.h"
 #include "gui/guiMainMenu.h"
 #include "client/clientlauncher.h"
 #include "gui/guiEngine.h"
@@ -72,11 +72,8 @@ extern "C" {
 #endif
 }
 
-#if !defined(SERVER) && \
-	(IRRLICHT_VERSION_MAJOR == 1) && \
-	(IRRLICHT_VERSION_MINOR == 8) && \
-	(IRRLICHT_VERSION_REVISION == 2)
-	#error "Irrlicht 1.8.2 is known to be broken - please update Irrlicht to version >= 1.8.3"
+#if !defined(__cpp_rtti) || !defined(__cpp_exceptions)
+#error Minetest cannot be built without exceptions or RTTI
 #endif
 
 #define DEBUGFILE "debug.txt"
@@ -103,6 +100,7 @@ static void list_worlds(bool print_name, bool print_path);
 static bool setup_log_params(const Settings &cmd_args);
 static bool create_userdata_path();
 static bool init_common(const Settings &cmd_args, int argc, char *argv[]);
+static void uninit_common();
 static void startup_message();
 static bool read_config_file(const Settings &cmd_args);
 static void init_log_streams(const Settings &cmd_args);
@@ -224,6 +222,7 @@ int main(int argc, char *argv[])
 		errorstream << "Unittest support is not enabled in this binary. "
 			<< "If you want to enable it, compile project with BUILD_UNITTESTS=1 flag."
 			<< std::endl;
+		return 1;
 #endif
 	}
 
@@ -247,8 +246,12 @@ int main(int argc, char *argv[])
 		return run_dedicated_server(game_params, cmd_args) ? 0 : 1;
 
 #ifndef SERVER
-	ClientLauncher launcher;
-	retval = launcher.run(game_params, cmd_args) ? 0 : 1;
+	{
+		ClientLauncher launcher;
+		retval = launcher.run(game_params, cmd_args) ? 0 : 1;
+		// The fetch thread is an SDL thread: it ends before the device quits SDL
+		httpfetch_cleanup();
+	}
 #else
 	retval = 0;
 #endif
@@ -258,9 +261,6 @@ int main(int argc, char *argv[])
 		g_settings->updateConfigFile(g_settings_path.c_str());
 
 	print_modified_quicktune_values();
-
-	// Stop httpfetch thread (if started)
-	httpfetch_cleanup();
 
 	END_DEBUG_EXCEPTION_HANDLER
 
@@ -332,13 +332,13 @@ static void set_allowed_options(OptionList *allowed_options)
 		_("Migrate from current players backend to another (Only works when using minetestserver or with --server)"))));
 	allowed_options->insert(std::make_pair("migrate-auth", ValueSpec(VALUETYPE_STRING,
 		_("Migrate from current auth backend to another (Only works when using minetestserver or with --server)"))));
+	allowed_options->insert(std::make_pair("migrate-mod-storage", ValueSpec(VALUETYPE_STRING,
+		_("Migrate from current mod storage backend to another (Only works when using minetestserver or with --server)"))));
 	allowed_options->insert(std::make_pair("terminal", ValueSpec(VALUETYPE_FLAG,
 			_("Feature an interactive terminal (Only works when using minetestserver or with --server)"))));
 	allowed_options->insert(std::make_pair("recompress", ValueSpec(VALUETYPE_FLAG,
 			_("Recompress the blocks of the given map database."))));
 #ifndef SERVER
-	allowed_options->insert(std::make_pair("videomodes", ValueSpec(VALUETYPE_FLAG,
-			_("Show available video modes"))));
 	allowed_options->insert(std::make_pair("speedtests", ValueSpec(VALUETYPE_FLAG,
 			_("Run speed tests"))));
 	allowed_options->insert(std::make_pair("address", ValueSpec(VALUETYPE_STRING,
@@ -524,12 +524,16 @@ static bool init_common(const Settings &cmd_args, int argc, char *argv[])
 	startup_message();
 	set_default_settings();
 
-	// Initialize sockets
 	sockets_init();
-	atexit(sockets_cleanup);
 
 	// Initialize g_settings
 	Settings::createLayer(SL_GLOBAL);
+
+	// Set cleanup callback(s) to run at process exit
+#ifndef __ANDROID__
+	// Android quits with _Exit, its exit() only follows a fatal error with other threads running
+	atexit(uninit_common);
+#endif
 
 	if (!read_config_file(cmd_args))
 		return false;
@@ -550,6 +554,17 @@ static bool init_common(const Settings &cmd_args, int argc, char *argv[])
 #endif
 
 	return true;
+}
+
+static void uninit_common()
+{
+	httpfetch_cleanup();
+
+	sockets_cleanup();
+
+	// It'd actually be okay to leak these but we want to please valgrind...
+	for (int i = 0; i < (int)SL_TOTAL_COUNT; i++)
+		delete Settings::getLayer((SettingsLayer)i);
 }
 
 static void startup_message()
@@ -917,6 +932,9 @@ static bool run_dedicated_server(const GameParams &game_params, const Settings &
 	if (cmd_args.exists("migrate-auth"))
 		return ServerEnvironment::migrateAuthDatabase(game_params, cmd_args);
 
+	if (cmd_args.exists("migrate-mod-storage"))
+		return Server::migrateModStorageDatabase(game_params, cmd_args);
+
 	if (cmd_args.getFlag("recompress"))
 		return recompress_map_database(game_params, cmd_args, bind_addr);
 
@@ -1062,6 +1080,7 @@ static bool migrate_map_database(const GameParams &game_params, const Settings &
 	}
 	std::cerr << std::endl;
 	new_db->endSave();
+	new_db->compact();
 
 	actionstream << "Successfully migrated " << count << " blocks" << std::endl;
 	world_mt.set("backend", migrate_to);

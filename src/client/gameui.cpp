@@ -74,7 +74,7 @@ void GameUI::init(Client *client)
 	// At the middle of the screen
 	// Object infos are shown in this
 	//u32 chat_font_height = m_guitext_chat->getActiveFont()->getDimension(L"Ay").Height;
-	v2u32 screensize = RenderingEngine::get_instance()->getWindowSize();
+	v2u32 screensize = RenderingEngine::getWindowSize();
 	s32 text_height = g_fontengine->getTextHeight() * 6;
 	s32 top_y = (screensize.Y - text_height) / 2;
 	s32 horiz_offset = 100 + client->getRoundScreen();
@@ -101,16 +101,16 @@ void GameUI::update(const RunStats &stats, Client *client, MapDrawControl *draw_
 	const CameraOrientation &cam, const PointedThing &pointed_old,
 	const GUIChatConsole *chat_console, float dtime)
 {
-	v2u32 screensize = RenderingEngine::get_instance()->getWindowSize();
+	v2u32 screensize = RenderingEngine::getWindowSize();
 	LocalPlayer *player = client->getEnv().getLocalPlayer();
 	v3f player_position = player->getPosition();
 
 	std::ostringstream os(std::ios_base::binary);
 	// Minimal debug text must only contain info that can't give a gameplay advantage
 	if (m_flags.show_minimal_debug) {
-		static float drawtime_avg = 0;
-		drawtime_avg = drawtime_avg * 0.95 + stats.drawtime * 0.05;
-		u16 fps = 1.0 / stats.dtime_jitter.avg;
+		const u16 fps = 1.0 / stats.dtime_jitter.avg;
+		m_drawtime_avg *= 0.95f;
+		m_drawtime_avg += 0.05f * (stats.drawtime / 1000);
 
 		const wchar_t *driver_name = RenderingEngine::get_video_driver()->getName();
 
@@ -119,7 +119,7 @@ void GameUI::update(const RunStats &stats, Client *client, MapDrawControl *draw_
 			<< " | FPS: " << fps
 			<< " | " << (driver_name ? wide_to_utf8(std::wstring(driver_name).substr(0, 25)) : "")
 			<< std::setprecision(0)
-			<< " | drawtime: " << drawtime_avg << "ms"
+			<< " | drawtime: " << m_drawtime_avg << "ms"
 			<< std::setprecision(1)
 			<< " | dtime jitter: "
 			<< (stats.dtime_jitter.max_fraction * 100.0) << "%"
@@ -282,7 +282,7 @@ void GameUI::updateChatSize()
 			chat_y += g_fontengine->getLineHeight();
 	}
 
-	const v2u32 &window_size = RenderingEngine::get_instance()->getWindowSize();
+	const v2u32 &window_size = RenderingEngine::getWindowSize();
 
 	core::rect<s32> chat_size(10, chat_y,
 		window_size.X - 20, 0);
@@ -303,8 +303,7 @@ void GameUI::updateProfiler()
 		os << "   Profiler page " << (int)m_profiler_current_page <<
 				", elapsed: " << g_profiler->getElapsedMs() << " ms)" << std::endl;
 
-		int lines = g_profiler->print(os, m_profiler_current_page, m_profiler_max_page);
-		++lines;
+		g_profiler->print(os, m_profiler_current_page, m_profiler_max_page);
 
 		EnrichedString str(utf8_to_wide(os.str()));
 		str.setBackground(video::SColor(120, 0, 0, 0));
@@ -359,12 +358,9 @@ void GameUI::toggleProfiler()
 	updateProfiler();
 
 	if (m_profiler_current_page != 0) {
-		wchar_t buf[255];
-		const wchar_t* str = wgettext("Profiler shown (page %d of %d)");
-		swprintf(buf, sizeof(buf) / sizeof(wchar_t), str,
-			m_profiler_current_page, m_profiler_max_page);
-		delete[] str;
-		showStatusText(buf);
+		std::wstring msg = fwgettext("Profiler shown (page %d of %d)",
+				m_profiler_current_page, m_profiler_max_page);
+		showStatusText(msg);
 	} else {
 		showTranslatedStatusText("Profiler hidden");
 	}

@@ -25,6 +25,14 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <string>
 #include "irrlichttypes_extrabloated.h"
 #include "debug.h"
+#include "client/render/core.h"
+// include the shadow mapper classes too
+#include "client/shadows/dynamicshadowsrender.h"
+
+struct VideoDriverInfo {
+	std::string name;
+	std::string friendly_name;
+};
 
 class ITextureSource;
 class Camera;
@@ -42,17 +50,14 @@ public:
 	RenderingEngine(IEventReceiver *eventReceiver);
 	~RenderingEngine();
 
-	v2u32 getWindowSize() const;
 	void setResizable(bool resize);
 
 	video::IVideoDriver *getVideoDriver() { return driver; }
 
-	static const char *getVideoDriverName(irr::video::E_DRIVER_TYPE type);
-	static const char *getVideoDriverFriendlyName(irr::video::E_DRIVER_TYPE type);
+	static const VideoDriverInfo &getVideoDriverInfo(irr::video::E_DRIVER_TYPE type);
 	static float getDisplayDensity();
 	static float getScreenScale();
 	static float getHudScaling();
-	static v2u32 getDisplaySize();
 	static int getWindowSafeArea();
 #ifdef HAVE_TOUCHSCREENGUI
 	static bool isTablet();
@@ -66,13 +71,22 @@ public:
 	bool setWindowIcon();
 	bool setXorgWindowIconFromPath(const std::string &icon_file);
 	static bool print_video_modes();
+	void cleanupMeshCache();
 
-	static RenderingEngine *get_instance() { return s_singleton; }
+	void removeMesh(const scene::IMesh* mesh);
 
-	static io::IFileSystem *get_filesystem()
+	// Zero before the engine starts, as the first pass of the default settings runs
+	static v2u32 getWindowSize()
 	{
-		sanity_check(s_singleton && s_singleton->m_device);
-		return s_singleton->m_device->getFileSystem();
+		return s_singleton ? s_singleton->_getWindowSize() : v2u32(0, 0);
+	}
+
+	// The last error Irrlicht logged, for the message of a device that did not start
+	static void noteEngineError(const std::string &text) { s_engine_error = text; }
+
+	io::IFileSystem *get_filesystem()
+	{
+		return m_device->getFileSystem();
 	}
 
 	static video::IVideoDriver *get_video_driver()
@@ -81,16 +95,9 @@ public:
 		return s_singleton->m_device->getVideoDriver();
 	}
 
-	static scene::IMeshCache *get_mesh_cache()
+	scene::ISceneManager *get_scene_manager()
 	{
-		sanity_check(s_singleton && s_singleton->m_device);
-		return s_singleton->m_device->getSceneManager()->getMeshCache();
-	}
-
-	static scene::ISceneManager *get_scene_manager()
-	{
-		sanity_check(s_singleton && s_singleton->m_device);
-		return s_singleton->m_device->getSceneManager();
+		return m_device->getSceneManager();
 	}
 
 	static irr::IrrlichtDevice *get_raw_device()
@@ -99,37 +106,23 @@ public:
 		return s_singleton->m_device;
 	}
 
-	static u32 get_timer_time()
+	u32 get_timer_time()
 	{
-		sanity_check(s_singleton && s_singleton->m_device &&
-				s_singleton->m_device->getTimer());
-		return s_singleton->m_device->getTimer()->getTime();
+		return m_device->getTimer()->getTime();
 	}
 
-	static gui::IGUIEnvironment *get_gui_env()
+	gui::IGUIEnvironment *get_gui_env()
 	{
-		sanity_check(s_singleton && s_singleton->m_device);
-		return s_singleton->m_device->getGUIEnvironment();
+		return m_device->getGUIEnvironment();
 	}
 
-	inline static void draw_load_screen(const std::wstring &text,
+	void draw_load_screen(const std::wstring &text,
 			gui::IGUIEnvironment *guienv, ITextureSource *tsrc,
-			float dtime = 0, int percent = 0)
-	{
-		s_singleton->_draw_load_screen(
-				text, guienv, tsrc, dtime, percent);
-	}
+			float dtime = 0, int percent = 0);
 
-	inline static void draw_load_cleanup()
-	{
-		s_singleton->_draw_load_cleanup();
-	}
+	void draw_load_cleanup();
 
-	inline static void set_load_screen_cancel(bool *flag)
-	{
-		if (s_singleton)
-			s_singleton->m_load_cancel = flag;
-	}
+	void set_load_screen_cancel(bool *flag) { m_load_cancel = flag; }
 
 	inline static void cancel_load_screen()
 	{
@@ -140,73 +133,45 @@ public:
 	//! Feeds a tap to the cancel button, which the GUI cannot reach on its own
 	static bool handle_load_screen_touch(const SEvent &event);
 
-	inline static void draw_menu_scene(
-			gui::IGUIEnvironment *guienv, ITextureSource *tsrc,
-			float dtime)
+	void draw_menu_scene(gui::IGUIEnvironment *guienv, ITextureSource *tsrc, float dtime);
+	void draw_scene(video::SColor skycolor, bool show_hud,
+			bool show_minimap, bool draw_wield_tool, bool draw_crosshair, bool draw_nametags);
+
+	void initialize(Client *client, Hud *hud);
+	void finalize();
+
+	void clear_irrlicht_texture_cache();
+
+	bool run();
+
+	// FIXME: this is still global when it shouldn't be
+	static ShadowRenderer *get_shadow_renderer()
 	{
-		s_singleton->_draw_menu_scene(guienv, tsrc, dtime);
+		//if (s_singleton && s_singleton->core)
+		//	return s_singleton->core->get_shadow_renderer();
+		return nullptr;
 	}
-
-	inline static void draw_scene(video::SColor skycolor, bool show_hud,
-			bool show_minimap, bool draw_wield_tool, bool draw_crosshair, bool draw_nametags)
-	{
-		s_singleton->_draw_scene(skycolor, show_hud, show_minimap,
-				draw_wield_tool, draw_crosshair, draw_nametags);
-	}
-
-	inline static void initialize(Client *client, Hud *hud)
-	{
-		s_singleton->_initialize(client, hud);
-	}
-
-	inline static void finalize() { s_singleton->_finalize(); }
-
-	inline static void clear_irrlicht_texture_cache() { s_singleton->_clear_irrlicht_texture_cache(); }
-
-	static bool run()
-	{
-		sanity_check(s_singleton && s_singleton->m_device);
-		return s_singleton->m_device->run();
-	}
-
-	static std::vector<core::vector3d<u32>> getSupportedVideoModes();
 	static std::vector<irr::video::E_DRIVER_TYPE> getSupportedVideoDrivers();
 
-	static void setLoadScreenBackground(const bool clouds, const std::string texture,
+	void setLoadScreenBackground(const bool clouds, const std::string texture,
 			const video::SColor sky_color)
 	{
-		if (s_singleton) {
-			s_singleton->m_load_bg_clouds = clouds;
-			s_singleton->m_load_bg_texture = texture;
-			s_singleton->m_sky_color = sky_color;
-		}
+		m_load_bg_clouds = clouds;
+		m_load_bg_texture = texture;
+		m_sky_color = sky_color;
 	}
 
 private:
-	void _draw_load_screen(const std::wstring &text, gui::IGUIEnvironment *guienv,
-			ITextureSource *tsrc, float dtime = 0, int percent = 0);
-
-	void _draw_menu_scene(gui::IGUIEnvironment *guienv,
-			ITextureSource *tsrc, float dtime = 0);
+	v2u32 _getWindowSize() const;
 
 	void _draw_load_bg(gui::IGUIEnvironment *guienv,
 			ITextureSource *tsrc, float dtime = 0);
-
-	void _draw_scene(video::SColor skycolor, bool show_hud, bool show_minimap,
-			bool draw_wield_tool, bool draw_crosshair, bool draw_nametags);
-
-	void _draw_load_cleanup();
-
-	void _initialize(Client *client, Hud *hud);
-
-	void _finalize();
-
-	void _clear_irrlicht_texture_cache();
 
 	std::unique_ptr<RenderingCore> core;
 	irr::IrrlichtDevice *m_device = nullptr;
 	irr::video::IVideoDriver *driver;
 	static RenderingEngine *s_singleton;
+	static std::string s_engine_error;
 
 	gui::IGUIStaticText *m_load_text = nullptr;
 	gui::IGUIElement *m_load_root = nullptr;

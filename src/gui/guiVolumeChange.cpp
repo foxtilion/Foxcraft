@@ -94,8 +94,7 @@ void GUIVolumeChange::regenerateGui(v2u32 screensize)
 	float s = MYMIN(screensize.X / 380.f, screensize.Y / 180.f);
 #if HAVE_TOUCHSCREENGUI
 #ifdef __IOS__
-	const char *model = MultiCraft::getDeviceModel();
-	if (!isDevice11Inch(model) && !isDevice12and9Inch(model))
+	if (!isDevice11Inch() && !isDevice12and9Inch())
 		s *= 0.5f;
 	else
 		s *= 0.4f;
@@ -131,11 +130,12 @@ void GUIVolumeChange::regenerateGui(v2u32 screensize)
 		core::rect<s32> rect(0, 0, 320 * s, 25 * s);
 		rect = rect + v2s32(30 * s, size.Y / 2 - 35 * s); // 55
 
-		const wchar_t *text = wgettext("Sound Volume: ");
+		wchar_t text[100];
+		const wchar_t *str = wgettext("Sound Volume: %d%%");
+		swprintf(text, sizeof(text) / sizeof(wchar_t), str, volume);
+		delete[] str;
 		core::stringw volume_text = text;
-		delete[] text;
 
-		volume_text += core::stringw(volume) + core::stringw("%");
 		Environment->addStaticText(volume_text.c_str(), rect, false,
 				true, this, ID_soundText);
 	}
@@ -250,11 +250,13 @@ bool GUIVolumeChange::OnEvent(const SEvent& event)
 					g_settings->setBool("mute_sound", false);
 
 				gui::IGUIElement *e = getElementFromId(ID_soundText);
-				const wchar_t *text = wgettext("Sound Volume: ");
-				core::stringw volume_text = text;
-				delete[] text;
+				wchar_t text[100];
+				const wchar_t *str = wgettext("Sound Volume: %d%%");
+				swprintf(text, sizeof(text) / sizeof(wchar_t), str, pos);
+				delete[] str;
 
-				volume_text += core::stringw(pos) + core::stringw("%");
+				core::stringw volume_text = text;
+
 				e->setText(volume_text.c_str());
 				return true;
 			}

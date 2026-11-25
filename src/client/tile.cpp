@@ -35,12 +35,19 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "imagefilters.h"
 #include "guiscalingfilter.h"
 #include "renderingengine.h"
+#include "util/base64.h"
 
 /*
 	A cache from texture name to texture path
 */
 MutexedMap<std::string, std::string> g_texturename_to_path_cache;
 bool g_disable_texture_packs = false;
+
+// Texture strings come from servers: limits of one image, of a whole string and of nesting
+static const u32 MAX_IMAGE_SIDE = 16384;
+static const u32 MAX_IMAGE_AREA = 4096 * 4096;
+static const u64 MAX_IMAGE_BUDGET = 2 * (u64)MAX_IMAGE_AREA;
+static const u32 MAX_IMAGE_DEPTH = 256;
 
 /*
 	Replaces the filename extension.
@@ -84,11 +91,8 @@ static bool replace_ext(std::string &path, const char *ext)
 std::string getImagePath(std::string path)
 {
 	// A NULL-ended list of possible image extensions
-	const char *extensions[] = {
-		"png", "jpg", "bmp", "tga",
-		NULL
-	};
-	// If there is no extension, add one
+	const char *extensions[] = { "png", "jpg", "bmp", "tga", NULL };
+	// If there is no extension, assume PNG
 	if (removeStringEnd(path, extensions).empty())
 		path = path + ".png";
 	// Check paths until something is found to exist
@@ -188,6 +192,8 @@ struct TextureInfo
 {
 	std::string name;
 	video::ITexture *texture;
+	bool transient = false;
+	u64 last_used = 0;
 
 	TextureInfo(
 			const std::string &name_,
@@ -358,7 +364,7 @@ public:
 			Buffer<char> data_rw(decrypted_data.c_str(), decrypted_data.size());
 
 			// Create an irrlicht memory file
-			io::IFileSystem *irrfs = RenderingEngine::get_filesystem();
+			io::IFileSystem *irrfs = RenderingEngine::get_raw_device()->getFileSystem();
 			io::IReadFile *rfile = irrfs->createMemoryReadFile(
 					*data_rw, data_rw.getSize(), "_tempreadfile");
 
@@ -394,7 +400,7 @@ private:
 		TRACESTREAM(<< "Client: Attempting to process image "
 			<< "file \"" << filename << "\" from RAM" << std::endl);
 
-		io::IFileSystem *irrfs = RenderingEngine::get_filesystem();
+		io::IFileSystem *irrfs = RenderingEngine::get_raw_device()->getFileSystem();
 		video::IVideoDriver *vdrv = RenderingEngine::get_video_driver();
 
 		// Silly irrlicht's const-incorrectness
@@ -492,6 +498,10 @@ public:
 	video::ITexture* getTexture(u32 id);
 
 	video::ITexture* getTexture(const std::string &name, u32 *id = NULL);
+	video::ITexture* getTextureTransient(const std::string &name, u32 *id = NULL);
+	video::ITexture* getTextureForMeshTransient(const std::string &name, u32 *id = NULL);
+
+	u32 evictUnused(u64 idle_ms);
 
 	/*
 		Get a texture specifically intended for mesh
@@ -530,7 +540,6 @@ public:
 
 	video::ITexture* getNormalTexture(const std::string &name);
 	video::SColor getTextureAverageColor(const std::string &name);
-	video::ITexture *getShaderFlagsTexture(bool normamap_present);
 
 	video::IImage* getTextureImage(const std::string &name)
 	{
@@ -548,11 +557,16 @@ private:
 	SourceImageCache m_sourcecache;
 
 	// Generate a texture
-	u32 generateTexture(const std::string &name);
+	u32 generateTexture(const std::string &name, bool transient = false);
 
 	// Generate image based on a string like "stone.png" or "[crack:1:0".
 	// if baseimg is NULL, it is created. Otherwise stuff is made on it.
 	bool generateImagePart(std::string part_of_name, video::IImage *& baseimg);
+
+	// Takes an image of this size from the budget of the string being generated
+	bool takeImageBudget(u32 width, u32 height);
+	u64 m_image_budget = 0;
+	u32 m_image_depth = 0;
 
 	/*! Generates an image from a full string like
 	 * "stone.png^mineral_coal.png^[crack:1:0".
@@ -575,6 +589,11 @@ private:
 	// Queued texture fetches (to be processed by the main thread)
 	RequestQueue<std::string, u32, u8, u8> m_get_texture_queue;
 
+	u32 resolveTextureId(const std::string &name, bool transient);
+	video::ITexture* getTextureInternal(const std::string &name, u32 *id, bool transient);
+	video::ITexture* getTextureForMeshInternal(const std::string &name, u32 *id,
+			bool transient);
+
 	// Textures that have been overwritten with other ones
 	// but can't be deleted because the ITexture* might still be used
 	std::vector<video::ITexture*> m_texture_trash;
@@ -583,6 +602,7 @@ private:
 	std::unordered_map<std::string, Palette> m_palettes;
 
 	// Cached settings needed for making textures from meshes
+	bool m_setting_mipmap;
 	bool m_setting_trilinear_filter;
 	bool m_setting_bilinear_filter;
 	bool m_setting_convert_to_16bit;
@@ -604,6 +624,7 @@ TextureSource::TextureSource(bool main_menu) : m_sourcecache(SourceImageCache(ma
 	// Cache some settings
 	// Note: Since this is only done once, the game must be restarted
 	// for these settings to take effect
+	m_setting_mipmap = g_settings->getBool("mip_map");
 	m_setting_trilinear_filter = g_settings->getBool("trilinear_filter");
 	m_setting_bilinear_filter = g_settings->getBool("bilinear_filter");
 	m_setting_convert_to_16bit = g_settings->getBool("convert_to_16bit");
@@ -633,6 +654,11 @@ TextureSource::~TextureSource()
 
 u32 TextureSource::getTextureId(const std::string &name)
 {
+	return resolveTextureId(name, false);
+}
+
+u32 TextureSource::resolveTextureId(const std::string &name, bool transient)
+{
 	//infostream<<"getTextureId(): \""<<name<<"\""<<std::endl;
 
 	{
@@ -644,6 +670,10 @@ u32 TextureSource::getTextureId(const std::string &name)
 		n = m_name_to_id.find(name);
 		if (n != m_name_to_id.end())
 		{
+			// A texture asked for as resident stays
+			if (!transient)
+				m_textureinfo_cache[n->second].transient = false;
+			m_textureinfo_cache[n->second].last_used = porting::getTimeMs();
 			return n->second;
 		}
 	}
@@ -652,7 +682,7 @@ u32 TextureSource::getTextureId(const std::string &name)
 		Get texture
 	*/
 	if (std::this_thread::get_id() == m_main_thread) {
-		return generateTexture(name);
+		return generateTexture(name, transient);
 	}
 
 
@@ -661,8 +691,9 @@ u32 TextureSource::getTextureId(const std::string &name)
 	// We're gonna ask the result to be put into here
 	static ResultQueue<std::string, u32, u8, u8> result_queue;
 
-	// Throw a request in
-	m_get_texture_queue.add(name, 0, 0, &result_queue);
+	// Throw a request in. The queue merges the requests of one caller, so resident and transient
+	// ones come as two callers and keep apart
+	m_get_texture_queue.add(name, transient, 0, &result_queue);
 
 	try {
 		while(true) {
@@ -729,7 +760,12 @@ void imageTransform(u32 transform, video::IImage *src, video::IImage *dst);
 /*
 	This method generates all the textures
 */
-u32 TextureSource::generateTexture(const std::string &name)
+static bool is_generated_name(const std::string &name)
+{
+	return name.find('^') != std::string::npos || (!name.empty() && name[0] == '[');
+}
+
+u32 TextureSource::generateTexture(const std::string &name, bool transient)
 {
 	//infostream << "generateTexture(): name=\"" << name << "\"" << std::endl;
 
@@ -747,6 +783,9 @@ u32 TextureSource::generateTexture(const std::string &name)
 		std::map<std::string, u32>::iterator n;
 		n = m_name_to_id.find(name);
 		if (n != m_name_to_id.end()) {
+			if (!transient)
+				m_textureinfo_cache[n->second].transient = false;
+			m_textureinfo_cache[n->second].last_used = porting::getTimeMs();
 			return n->second;
 		}
 	}
@@ -786,6 +825,8 @@ u32 TextureSource::generateTexture(const std::string &name)
 
 	u32 id = m_textureinfo_cache.size();
 	TextureInfo ti(name, tex);
+	ti.transient = transient && is_generated_name(name);
+	ti.last_used = porting::getTimeMs();
 	m_textureinfo_cache.push_back(ti);
 	m_name_to_id[name] = id;
 
@@ -819,7 +860,18 @@ video::ITexture* TextureSource::getTexture(u32 id)
 
 video::ITexture* TextureSource::getTexture(const std::string &name, u32 *id)
 {
-	u32 actual_id = getTextureId(name);
+	return getTextureInternal(name, id, false);
+}
+
+video::ITexture* TextureSource::getTextureTransient(const std::string &name, u32 *id)
+{
+	return getTextureInternal(name, id, true);
+}
+
+video::ITexture* TextureSource::getTextureInternal(const std::string &name, u32 *id,
+		bool transient)
+{
+	u32 actual_id = resolveTextureId(name, transient);
 	if (id){
 		*id = actual_id;
 	}
@@ -828,14 +880,25 @@ video::ITexture* TextureSource::getTexture(const std::string &name, u32 *id)
 
 video::ITexture* TextureSource::getTextureForMesh(const std::string &name, u32 *id)
 {
+	return getTextureForMeshInternal(name, id, false);
+}
+
+video::ITexture* TextureSource::getTextureForMeshTransient(const std::string &name, u32 *id)
+{
+	return getTextureForMeshInternal(name, id, true);
+}
+
+video::ITexture* TextureSource::getTextureForMeshInternal(const std::string &name, u32 *id,
+		bool transient)
+{
 	static thread_local bool filter_needed =
-		g_settings->getBool("texture_clean_transparent") ||
+		g_settings->getBool("texture_clean_transparent") || m_setting_mipmap ||
 		((m_setting_trilinear_filter || m_setting_bilinear_filter) &&
 		g_settings->getS32("texture_min_size") > 1);
 	// Avoid duplicating texture if it won't actually change
 	if (filter_needed)
-		return getTexture(name + "^[applyfiltersformesh", id);
-	return getTexture(name, id);
+		return getTextureInternal(name + "^[applyfiltersformesh", id, transient);
+	return getTextureInternal(name, id, transient);
 }
 
 Palette* TextureSource::getPalette(const std::string &name)
@@ -909,7 +972,10 @@ void TextureSource::processQueue()
 				<<"name=\""<<request.key<<"\""
 				<<std::endl;*/
 
-		m_get_texture_queue.pushResult(request, generateTexture(request.key));
+		// Transient only if every caller asked for it so
+		const bool transient = std::all_of(request.callers.begin(), request.callers.end(),
+				[] (const CallerInfo<u8, u8, std::string, u32> &c) { return c.caller != 0; });
+		m_get_texture_queue.pushResult(request, generateTexture(request.key, transient));
 	}
 }
 
@@ -929,6 +995,56 @@ void TextureSource::insertSourceImage(const std::string &name, const std::string
 
 	m_sourcecache.insert(name, data);
 	m_source_image_existence.set(name, true);
+}
+
+u32 TextureSource::evictUnused(u64 idle_ms)
+{
+	if (std::this_thread::get_id() != m_main_thread)
+		return 0;
+
+	video::IVideoDriver *driver = RenderingEngine::get_video_driver();
+	const u64 now = porting::getTimeMs();
+	u32 resident = 0, held = 0, warm = 0, evicted = 0;
+	u64 freed_pixels = 0;
+
+	MutexAutoLock lock(m_textureinfo_cache_mutex);
+
+	for (u32 id = 1; id < m_textureinfo_cache.size(); id++) {
+		TextureInfo &ti = m_textureinfo_cache[id];
+		if (ti.name.empty())
+			continue;
+		if (!ti.transient) {
+			resident++;
+			continue;
+		}
+		if (ti.texture && ti.texture->getReferenceCount() > 1) {
+			held++;
+			continue;
+		}
+		if (now - ti.last_used < idle_ms) {
+			warm++;
+			continue;
+		}
+
+		m_name_to_id.erase(ti.name);
+		if (ti.texture) {
+			const core::dimension2d<u32> &size = ti.texture->getSize();
+			freed_pixels += (u64)size.Width * size.Height;
+			verbosestream << "TextureSource: evict " << size.Width << "x"
+					<< size.Height << " '" << ti.name << "'" << std::endl;
+			driver->removeTexture(ti.texture);
+			ti.texture = nullptr;
+		}
+		ti.name.clear();
+		evicted++;
+	}
+
+	if (evicted)
+		infostream << "TextureSource: evicted " << evicted
+				<< " (~" << (freed_pixels * 4 >> 10) << " KiB), kept "
+				<< warm << " warm + " << held << " held + "
+				<< resident << " resident" << std::endl;
+	return evicted;
 }
 
 void TextureSource::rebuildImagesAndTextures()
@@ -1011,17 +1127,16 @@ static video::IImage *createInventoryCubeImage(
 			image = scaled;
 		}
 		sanity_check(image->getPitch() == 4 * size);
-		return reinterpret_cast<u32 *>(image->lock());
+		return reinterpret_cast<u32 *>(image->getData());
 	};
 	auto free_image = [] (video::IImage *image) -> void {
-		image->unlock();
 		image->drop();
 	};
 
 	video::IImage *result = driver->createImage(video::ECF_A8R8G8B8, {cube_size, cube_size});
 	sanity_check(result->getPitch() == 4 * cube_size);
 	result->fill(video::SColor(0x00000000u));
-	u32 *target = reinterpret_cast<u32 *>(result->lock());
+	u32 *target = reinterpret_cast<u32 *>(result->getData());
 
 	// Draws single cube face
 	// `shade_factor` is face brightness, in range [0.0, 1.0]
@@ -1080,12 +1195,41 @@ static video::IImage *createInventoryCubeImage(
 				{0, 5}, {1, 5},
 			});
 
-	result->unlock();
 	return result;
+}
+
+bool TextureSource::takeImageBudget(u32 width, u32 height)
+{
+	const u64 pixels = (u64)width * height;
+	if (width > MAX_IMAGE_SIDE || height > MAX_IMAGE_SIDE || pixels > MAX_IMAGE_AREA ||
+			pixels > m_image_budget) {
+		if (m_image_budget > 0)
+			errorstream << "generateImage(): texture string asks for too large an image "
+					<< width << "x" << height << std::endl;
+		m_image_budget = 0;
+		return false;
+	}
+	m_image_budget -= pixels;
+	return true;
 }
 
 video::IImage* TextureSource::generateImage(const std::string &name)
 {
+	if (m_image_depth == 0)
+		m_image_budget = MAX_IMAGE_BUDGET;
+	else if (m_image_budget == 0)
+		return NULL;
+	if (m_image_depth == MAX_IMAGE_DEPTH) {
+		errorstream << "generateImage(): a texture nests deeper than "
+				<< MAX_IMAGE_DEPTH << " parts" << std::endl;
+		m_image_budget = 0;
+		return NULL;
+	}
+	struct Depth {
+		u32 &value;
+		~Depth() { --value; }
+	} depth{++m_image_depth};
+
 	// Get the base image
 
 	const char separator = '^';
@@ -1138,6 +1282,8 @@ video::IImage* TextureSource::generateImage(const std::string &name)
 	*/
 	if (last_separator_pos != -1) {
 		baseimg = generateImage(name.substr(0, last_separator_pos));
+		if (!baseimg && m_image_budget == 0)
+			return NULL;
 	}
 
 	/*
@@ -1156,6 +1302,11 @@ video::IImage* TextureSource::generateImage(const std::string &name)
 		std::string name2 = last_part_of_name.substr(1,
 				last_part_of_name.size() - 2);
 		video::IImage *tmp = generateImage(name2);
+		if (!tmp && m_image_budget == 0) {
+			if (baseimg)
+				baseimg->drop();
+			return NULL;
+		}
 		if (!tmp) {
 			errorstream << "generateImage(): "
 				"Failed to generate \"" << name2 << "\""
@@ -1211,9 +1362,53 @@ static std::string unescape_string(const std::string &str, const char esc = '\\'
 	return out;
 }
 
+void blitBaseImage(video::IImage* &src, video::IImage* &dst)
+{
+	//infostream<<"Blitting "<<part_of_name<<" on base"<<std::endl;
+	// Size of the copied area
+	core::dimension2d<u32> dim = src->getDimension();
+	//core::dimension2d<u32> dim(16,16);
+	// Position to copy the blitted to in the base image
+	core::position2d<s32> pos_to(0,0);
+	// Position to copy the blitted from in the blitted image
+	core::position2d<s32> pos_from(0,0);
+	// Blit
+	/*image->copyToWithAlpha(baseimg, pos_to,
+			core::rect<s32>(pos_from, dim),
+			video::SColor(255,255,255,255),
+			NULL);*/
+
+	core::dimension2d<u32> dim_dst = dst->getDimension();
+	if (dim == dim_dst) {
+		blit_with_alpha(src, dst, pos_from, pos_to, dim);
+	} else if (dim.Width * dim.Height < dim_dst.Width * dim_dst.Height) {
+		// Upscale overlying image
+		video::IImage *scaled_image = RenderingEngine::get_video_driver()->
+			createImage(video::ECF_A8R8G8B8, dim_dst);
+		src->copyToScaling(scaled_image);
+
+		blit_with_alpha(scaled_image, dst, pos_from, pos_to, dim_dst);
+		scaled_image->drop();
+	} else {
+		// Upscale base image
+		video::IImage *scaled_base = RenderingEngine::get_video_driver()->
+			createImage(video::ECF_A8R8G8B8, dim);
+		dst->copyToScaling(scaled_base);
+		dst->drop();
+		dst = scaled_base;
+
+		blit_with_alpha(src, dst, pos_from, pos_to, dim);
+	}
+}
+
 bool TextureSource::generateImagePart(std::string part_of_name,
 		video::IImage *& baseimg)
 {
+	// Each modifier walks over its base
+	if (baseimg && !takeImageBudget(baseimg->getDimension().Width,
+			baseimg->getDimension().Height))
+		return false;
+
 	const char escape = '\\'; // same as in generateImage()
 	video::IVideoDriver *driver = RenderingEngine::get_video_driver();
 	sanity_check(driver);
@@ -1277,41 +1472,7 @@ bool TextureSource::generateImagePart(std::string part_of_name,
 		// Else blit on base.
 		else
 		{
-			//infostream<<"Blitting "<<part_of_name<<" on base"<<std::endl;
-			// Size of the copied area
-			core::dimension2d<u32> dim = image->getDimension();
-			//core::dimension2d<u32> dim(16,16);
-			// Position to copy the blitted to in the base image
-			core::position2d<s32> pos_to(0,0);
-			// Position to copy the blitted from in the blitted image
-			core::position2d<s32> pos_from(0,0);
-			// Blit
-			/*image->copyToWithAlpha(baseimg, pos_to,
-					core::rect<s32>(pos_from, dim),
-					video::SColor(255,255,255,255),
-					NULL);*/
-
-			core::dimension2d<u32> dim_dst = baseimg->getDimension();
-			if (dim == dim_dst) {
-				blit_with_alpha(image, baseimg, pos_from, pos_to, dim);
-			} else if (dim.Width * dim.Height < dim_dst.Width * dim_dst.Height) {
-				// Upscale overlying image
-				video::IImage *scaled_image = RenderingEngine::get_video_driver()->
-					createImage(video::ECF_A8R8G8B8, dim_dst);
-				image->copyToScaling(scaled_image);
-
-				blit_with_alpha(scaled_image, baseimg, pos_from, pos_to, dim_dst);
-				scaled_image->drop();
-			} else {
-				// Upscale base image
-				video::IImage *scaled_base = RenderingEngine::get_video_driver()->
-					createImage(video::ECF_A8R8G8B8, dim);
-				baseimg->copyToScaling(scaled_base);
-				baseimg->drop();
-				baseimg = scaled_base;
-
-				blit_with_alpha(image, baseimg, pos_from, pos_to, dim);
-			}
+			blitBaseImage(image, baseimg);
 		}
 		//cleanup
 		image->drop();
@@ -1356,6 +1517,7 @@ bool TextureSource::generateImagePart(std::string part_of_name,
 				frame_count = progression;
 				progression = stoi(s);
 			}
+			tiles = core::clamp(tiles, 1, 255);
 
 			if (progression >= 0) {
 				/*
@@ -1392,6 +1554,8 @@ bool TextureSource::generateImagePart(std::string part_of_name,
 			u32 h0 = stoi(sf.next(":"));
 			core::dimension2d<u32> dim(w0,h0);
 			if (baseimg == NULL) {
+				if (!takeImageBudget(w0, h0))
+					return false;
 				baseimg = driver->createImage(video::ECF_A8R8G8B8, dim);
 				baseimg->fill(video::SColor(0,0,0,0));
 			}
@@ -1764,8 +1928,8 @@ bool TextureSource::generateImagePart(std::string part_of_name,
 				return false;
 			}
 
-			// Apply the "clean transparent" filter, if configured.
-			if (g_settings->getBool("texture_clean_transparent"))
+			// Apply the "clean transparent" filter, if needed
+			if (m_setting_mipmap || g_settings->getBool("texture_clean_transparent"))
 				imageCleanTransparent(baseimg, 127);
 
 			/* Upscale textures to user's requested minimum size.  This is a trick to make
@@ -1794,7 +1958,7 @@ bool TextureSource::generateImagePart(std::string part_of_name,
 				u32 scale = (xscale > yscale) ? xscale : yscale;
 
 				// Never downscale; only scale up by 2x or more.
-				if (scale > 1) {
+				if (scale > 1 && takeImageBudget(scale * dim.Width, scale * dim.Height)) {
 					u32 w = scale * dim.Width;
 					u32 h = scale * dim.Height;
 					const core::dimension2d<u32> newdim = core::dimension2d<u32>(w, h);
@@ -1824,6 +1988,8 @@ bool TextureSource::generateImagePart(std::string part_of_name,
 			u32 width = stoi(sf.next("x"));
 			u32 height = stoi(sf.next(""));
 			core::dimension2d<u32> dim(width, height);
+			if (!takeImageBudget(width, height))
+				return false;
 
 			video::IImage *image = RenderingEngine::get_video_driver()->
 				createImage(video::ECF_A8R8G8B8, dim);
@@ -1942,6 +2108,51 @@ bool TextureSource::generateImagePart(std::string part_of_name,
 			// Replace baseimg
 			baseimg->drop();
 			baseimg = img;
+		}
+		/*
+			[png:base64
+			Decodes a PNG image in base64 form.
+			Use minetest.encode_png and minetest.encode_base64
+			to produce a valid string.
+		*/
+		else if (str_starts_with(part_of_name, "[png:")) {
+			Strfnd sf(part_of_name);
+			sf.next(":");
+			std::string png;
+			{
+				std::string blob = sf.next("");
+				if (!base64_is_valid(blob)) {
+					errorstream << "generateImagePart(): "
+								<< "malformed base64 in '[png'"
+								<< std::endl;
+					return false;
+				}
+				png = base64_decode(blob);
+			}
+
+			auto *device = RenderingEngine::get_raw_device();
+			auto *fs = device->getFileSystem();
+			auto *vd = device->getVideoDriver();
+			auto *memfile = fs->createMemoryReadFile(png.data(), png.size(), "__temp_png");
+			video::IImage* pngimg = vd->createImageFromFile(memfile);
+			memfile->drop();
+			if (!pngimg) {
+				errorstream << "generateImagePart(): broken '[png'" << std::endl;
+				return false;
+			}
+			if (!takeImageBudget(pngimg->getDimension().Width, pngimg->getDimension().Height)) {
+				pngimg->drop();
+				return false;
+			}
+
+			if (baseimg) {
+				blitBaseImage(pngimg, baseimg);
+			} else {
+				core::dimension2d<u32> dim = pngimg->getDimension();
+				baseimg = driver->createImage(video::ECF_A8R8G8B8, dim);
+				pngimg->copyTo(baseimg);
+			}
+			pngimg->drop();
 		}
 		else
 		{
@@ -2479,6 +2690,48 @@ video::ITexture* TextureSource::getNormalTexture(const std::string &name)
 	return NULL;
 }
 
+namespace {
+	// For more colourspace transformations, see for example
+	// https://github.com/tobspr/GLSL-Color-Spaces/blob/master/ColorSpaces.inc.glsl
+
+	inline float linear_to_srgb_component(float v)
+	{
+		if (v > 0.0031308f)
+			return 1.055f * powf(v, 1.0f / 2.4f) - 0.055f;
+		return 12.92f * v;
+	}
+	inline float srgb_to_linear_component(float v)
+	{
+		if (v > 0.04045f)
+			return powf((v + 0.055f) / 1.055f, 2.4f);
+		return v / 12.92f;
+	}
+
+	v3f srgb_to_linear(const video::SColor &col_srgb)
+	{
+		v3f col(col_srgb.getRed(), col_srgb.getGreen(), col_srgb.getBlue());
+		col /= 255.0f;
+		col.X = srgb_to_linear_component(col.X);
+		col.Y = srgb_to_linear_component(col.Y);
+		col.Z = srgb_to_linear_component(col.Z);
+		return col;
+	}
+
+	video::SColor linear_to_srgb(const v3f &col_linear)
+	{
+		v3f col;
+		col.X = linear_to_srgb_component(col_linear.X);
+		col.Y = linear_to_srgb_component(col_linear.Y);
+		col.Z = linear_to_srgb_component(col_linear.Z);
+		col *= 255.0f;
+		col.X = core::clamp<float>(col.X, 0.0f, 255.0f);
+		col.Y = core::clamp<float>(col.Y, 0.0f, 255.0f);
+		col.Z = core::clamp<float>(col.Z, 0.0f, 255.0f);
+		return video::SColor(0xff, myround(col.X), myround(col.Y),
+			myround(col.Z));
+	}
+}
+
 video::SColor TextureSource::getTextureAverageColor(const std::string &name)
 {
 	video::SColor c(0, 0, 0, 0);
@@ -2487,9 +2740,7 @@ video::SColor TextureSource::getTextureAverageColor(const std::string &name)
 		return c;
 
 	u32 total = 0;
-	u32 tR = 0;
-	u32 tG = 0;
-	u32 tB = 0;
+	v3f col_acc(0, 0, 0);
 	core::dimension2d<u32> dim = image->getDimension();
 	u16 step = 1;
 	if (dim.Width > 16)
@@ -2499,42 +2750,17 @@ video::SColor TextureSource::getTextureAverageColor(const std::string &name)
 			c = image->getPixel(x,y);
 			if (c.getAlpha() > 0) {
 				total++;
-				tR += c.getRed();
-				tG += c.getGreen();
-				tB += c.getBlue();
+				col_acc += srgb_to_linear(c);
 			}
 		}
 	}
 	image->drop();
 	if (total > 0) {
-		c.setRed(tR / total);
-		c.setGreen(tG / total);
-		c.setBlue(tB / total);
+		col_acc /= total;
+		c = linear_to_srgb(col_acc);
 	}
 	c.setAlpha(255);
 	return c;
-}
-
-
-video::ITexture *TextureSource::getShaderFlagsTexture(bool normalmap_present)
-{
-	std::string tname = "__shaderFlagsTexture";
-	tname += normalmap_present ? "1" : "0";
-
-	if (isKnownSourceImage(tname)) {
-		return getTexture(tname);
-	}
-
-	video::IVideoDriver *driver = RenderingEngine::get_video_driver();
-	video::IImage *flags_image = driver->createImage(
-		video::ECF_A8R8G8B8, core::dimension2d<u32>(1, 1));
-	sanity_check(flags_image != NULL);
-	video::SColor c(255, normalmap_present ? 255 : 0, 0, 0);
-	flags_image->setPixel(0, 0, c);
-	insertSourceImage(tname, flags_image);
-	flags_image->drop();
-	return getTexture(tname);
-
 }
 
 std::vector<std::string> getTextureDirs()

@@ -99,9 +99,10 @@ public:
 		if (has_been_set && std::equal(m_sent, m_sent + count, value))
 			return;
 		if (is_pixel)
-			services->setPixelShaderConstant(m_name, value, count);
+			services->setPixelShaderConstant(services->getPixelShaderConstantID(m_name), value, count);
 		else
-			services->setVertexShaderConstant(m_name, value, count);
+			services->setVertexShaderConstant(services->getVertexShaderConstantID(m_name), value, count);
+
 		std::copy(value, value + count, m_sent);
 		has_been_set = true;
 	}
@@ -136,6 +137,12 @@ public:
 	virtual ShaderInfo getShaderInfo(u32 id){return ShaderInfo();}
 	virtual u32 getShader(const std::string &name,
 		MaterialType material_type, NodeDrawType drawtype = NDT_NORMAL){return 0;}
+	// The same program without point lights, or the material itself when it has none
+	virtual video::E_MATERIAL_TYPE getMaterialWithoutPointLights(
+			video::E_MATERIAL_TYPE material){return material;}
+	// Whether the material discards fragments by their alpha
+	virtual bool discardsByAlpha(video::E_MATERIAL_TYPE material)
+		{return material == video::EMT_TRANSPARENT_ALPHA_CHANNEL_REF;}
 };
 
 class IWritableShaderSource : public IShaderSource {
@@ -153,6 +160,9 @@ public:
 };
 
 IWritableShaderSource *createShaderSource();
+
+//! Hands the programs built alongside the client to a driver that cannot compile shader source
+void registerPrecompiledShaders(video::IVideoDriver *driver);
 
 void dumpShaderProgram(std::ostream &output_stream,
 	const std::string &program_type, const std::string &program);

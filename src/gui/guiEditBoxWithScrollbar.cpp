@@ -83,6 +83,9 @@ void GUIEditBoxWithScrollBar::draw()
 	if (!IsVisible)
 		return;
 
+	if (m_scroll_swipe)
+		m_scroll_swipe->updateScrollCoasting();
+
 	const bool focus = Environment->hasFocus(this);
 	const bool scollbar_focus = Environment->hasFocus(m_vscrollbar);
 
@@ -252,6 +255,17 @@ void GUIEditBoxWithScrollBar::draw()
 	IGUIElement::draw();
 }
 
+
+bool GUIEditBoxWithScrollBar::OnEvent(const SEvent &event)
+{
+	// A finger going up or down scrolls the text instead of marking it
+	if (m_scroll_swipe && m_scroll_swipe->onEvent(event)) {
+		m_mouse_marking = false;
+		setTextMarkers(0, 0);
+		return true;
+	}
+	return GUIEditBox::OnEvent(event);
+}
 
 s32 GUIEditBoxWithScrollBar::getCursorPos(s32 x, s32 y)
 {
@@ -615,6 +629,17 @@ void GUIEditBoxWithScrollBar::createVScrollBar()
 	if (Environment)
 		skin = Environment->getSkin();
 
+	s32 fontHeight = 1;
+
+	if (m_override_font) {
+		fontHeight = m_override_font->getDimension(L"Ay").Height;
+	} else {
+		IGUIFont *font;
+		if (skin && (font = skin->getFont())) {
+			fontHeight = font->getDimension(L"Ay").Height;
+		}
+	}
+
 	m_scrollbar_width = skin ? skin->getSize(gui::EGDS_SCROLLBAR_SIZE) : 16;
 
 	irr::core::rect<s32> scrollbarrect = m_frame_rect;
@@ -623,8 +648,16 @@ void GUIEditBoxWithScrollBar::createVScrollBar()
 			scrollbarrect, false, true, m_sound_manager);
 
 	m_vscrollbar->setVisible(false);
-	m_vscrollbar->setSmallStep(1);
-	m_vscrollbar->setLargeStep(1);
+	m_vscrollbar->setSmallStep(3 * fontHeight);
+	m_vscrollbar->setLargeStep(10 * fontHeight);
+
+#ifdef _IRR_COMPILE_WITH_SDL_DEVICE_
+#ifdef HAVE_TOUCHSCREENGUI
+	m_scroll_swipe = std::make_unique<ScrollSwipe>(Environment, this, ScrollSwipe::VERTICAL);
+	m_scroll_swipe->setScrollBar(m_vscrollbar);
+	m_scroll_swipe->setScrollFactor(-1.0f);
+#endif
+#endif
 }
 
 
@@ -634,26 +667,6 @@ void GUIEditBoxWithScrollBar::setBackgroundColor(const video::SColor &bg_color)
 {
 	m_bg_color = bg_color;
 	m_bg_color_used = true;
-}
-
-//! Writes attributes of the element.
-void GUIEditBoxWithScrollBar::serializeAttributes(io::IAttributes* out, io::SAttributeReadWriteOptions* options = 0) const
-{
-	out->addBool("Border", m_border);
-	out->addBool("Background", m_background);
-	// out->addFont("OverrideFont", OverrideFont);
-
-	GUIEditBox::serializeAttributes(out, options);
-}
-
-
-//! Reads attributes of the element
-void GUIEditBoxWithScrollBar::deserializeAttributes(io::IAttributes* in, io::SAttributeReadWriteOptions* options = 0)
-{
-	GUIEditBox::deserializeAttributes(in, options);
-
-	setDrawBorder(in->getAttributeAsBool("Border"));
-	setDrawBackground(in->getAttributeAsBool("Background"));
 }
 
 bool GUIEditBoxWithScrollBar::isDrawBackgroundEnabled() const { return false; }

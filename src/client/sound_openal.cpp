@@ -24,7 +24,11 @@ with this program; ifnot, write to the Free Software Foundation, Inc.,
 #include "sound_openal.h"
 
 #include <cmath>
+#ifdef USE_NOGG
+#include <nogg.h>
+#else
 #include <vorbis/vorbisfile.h>
+#endif
 #include <cassert>
 #include "log.h"
 #include "util/numeric.h" // myrand()
@@ -94,6 +98,133 @@ struct SoundBuffer
 	ALuint buffer_id;
 };
 
+#ifdef USE_NOGG
+// 32 MB is 6 minutes of mono at 44100 Hz
+static const size_t MAX_SOUND_SIZE = 32 * 1024 * 1024;
+static const int64_t MAX_DECODER_MEMORY = 16 * 1024 * 1024;
+
+SoundBuffer *load_opened_ogg_file(vorbis_t *oggFile,
+		const std::string &filename_for_logging)
+{
+	const int channels = vorbis_channels(oggFile);
+	int16_t array[BUFFER_SIZE / 2];
+	std::vector<char> buffer;
+	vorbis_error_t error;
+	int32_t frames;
+
+	do {
+		frames = vorbis_read_int16(oggFile, array, BUFFER_SIZE / 2 / channels, &error);
+		const char *bytes = (const char *)array;
+		buffer.insert(buffer.end(), bytes, bytes + frames * channels * sizeof(int16_t));
+		if (buffer.size() > MAX_SOUND_SIZE) {
+			vorbis_close(oggFile);
+			infostream << "Audio: Too large sound " << filename_for_logging << std::endl;
+			return nullptr;
+		}
+	} while ((error == VORBIS_NO_ERROR && frames > 0) ||
+			error == VORBIS_ERROR_DECODE_RECOVERED);
+
+	// What was decoded before an error stays, as with a cut-off file
+	if (buffer.empty() && error != VORBIS_ERROR_STREAM_END) {
+		vorbis_close(oggFile);
+		infostream << "Audio: Error decoding "
+			<< filename_for_logging << std::endl;
+		return nullptr;
+	}
+
+	SoundBuffer *snd = new SoundBuffer;
+	snd->format = channels == 1 ? AL_FORMAT_MONO16 : AL_FORMAT_STEREO16;
+	snd->freq = vorbis_rate(oggFile);
+	vorbis_close(oggFile);
+
+	alGenBuffers(1, &snd->buffer_id);
+	alBufferData(snd->buffer_id, snd->format, buffer.data(), buffer.size(), snd->freq);
+
+	ALenum al_error = alGetError();
+	if (al_error != AL_NO_ERROR) {
+		infostream << "Audio: OpenAL error: " << alErrorString(al_error)
+				<< "preparing sound buffer" << std::endl;
+	}
+
+	return snd;
+}
+
+SoundBuffer *load_ogg_from_file(const std::string &path)
+{
+	vorbis_t *oggFile = vorbis_open_file(path.c_str(), VORBIS_OPTION_SCAN_FOR_NEXT_PAGE, nullptr);
+	if (!oggFile) {
+		infostream << "Audio: Error opening " << path
+			<< " for decoding" << std::endl;
+		return nullptr;
+	}
+
+	return load_opened_ogg_file(oggFile, path);
+}
+
+struct OggBuffer
+{
+	const char *data;
+	int64_t length, position, decoder_memory;
+};
+
+static int64_t ogg_length(void *opaque)
+{
+	return static_cast<OggBuffer *>(opaque)->length;
+}
+
+static int64_t ogg_tell(void *opaque)
+{
+	return static_cast<OggBuffer *>(opaque)->position;
+}
+
+static void ogg_seek(void *opaque, int64_t offset)
+{
+	static_cast<OggBuffer *>(opaque)->position = offset;
+}
+
+static int32_t ogg_read(void *opaque, void *buffer, int32_t length)
+{
+	OggBuffer *b = static_cast<OggBuffer *>(opaque);
+	length = (int32_t)MYMIN((int64_t)length, b->length - b->position);
+	memcpy(buffer, b->data + b->position, length);
+	b->position += length;
+	return length;
+}
+
+static void *ogg_malloc(void *opaque, int32_t size, int32_t align)
+{
+	OggBuffer *b = static_cast<OggBuffer *>(opaque);
+	// Freed blocks stay counted: until it closes the decoder frees only small ones
+	b->decoder_memory += size;
+	void *ptr;
+	if (b->decoder_memory > MAX_DECODER_MEMORY || posix_memalign(&ptr,
+			MYMAX((size_t)align, alignof(std::max_align_t)), size) != 0)
+		return nullptr;
+	return ptr;
+}
+
+static void ogg_free(void *, void *ptr)
+{
+	free(ptr);
+}
+
+SoundBuffer *load_ogg_from_buffer(const std::string &buf, const std::string &id_for_log)
+{
+	static const vorbis_callbacks_t callbacks = {
+		&ogg_length, &ogg_tell, &ogg_seek, &ogg_read, nullptr, &ogg_malloc, &ogg_free
+	};
+	OggBuffer source = {buf.data(), (int64_t)buf.size(), 0, 0};
+	vorbis_t *oggFile = vorbis_open_callbacks(callbacks, &source,
+			VORBIS_OPTION_SCAN_FOR_NEXT_PAGE, nullptr);
+	if (!oggFile) {
+		infostream << "Audio: Error opening " << id_for_log
+			<< " for decoding" << std::endl;
+		return nullptr;
+	}
+
+	return load_opened_ogg_file(oggFile, id_for_log);
+}
+#else
 SoundBuffer *load_opened_ogg_file(OggVorbis_File *oggFile,
 		const std::string &filename_for_logging)
 {
@@ -243,6 +374,7 @@ SoundBuffer *load_ogg_from_buffer(const std::string &buf, const std::string &id_
 
 	return load_opened_ogg_file(&oggFile, id_for_log);
 }
+#endif
 
 struct PlayingSound
 {
@@ -425,6 +557,11 @@ public:
 		assert(sound);
 		warn_if_error(alGetError(), "before createPlayingSound");
 		alGenSources(1, &sound->source_id);
+		// All sources taken, as with hundreds of sounds playing: this one is skipped
+		if (alGetError() != AL_NO_ERROR) {
+			delete sound;
+			return nullptr;
+		}
 		alSourcei(sound->source_id, AL_BUFFER, buf->buffer_id);
 		alSourcei(sound->source_id, AL_SOURCE_RELATIVE, true);
 		alSource3f(sound->source_id, AL_POSITION, 0, 0, 0);
@@ -448,6 +585,10 @@ public:
 		assert(sound);
 		warn_if_error(alGetError(), "before createPlayingSoundAt");
 		alGenSources(1, &sound->source_id);
+		if (alGetError() != AL_NO_ERROR) {
+			delete sound;
+			return nullptr;
+		}
 		alSourcei(sound->source_id, AL_BUFFER, buf->buffer_id);
 		alSourcei(sound->source_id, AL_SOURCE_RELATIVE, false);
 		alSource3f(sound->source_id, AL_POSITION, pos.X, pos.Y, pos.Z);
@@ -692,8 +833,8 @@ public:
 
 		alSourcei(sound->source_id, AL_SOURCE_RELATIVE, false);
 		alSource3f(sound->source_id, AL_POSITION, pos.X, pos.Y, pos.Z);
-		alSource3f(sound->source_id, AL_VELOCITY, 0, 0, 0);
-		alSourcef(sound->source_id, AL_REFERENCE_DISTANCE, 30.0);
+		alSource3f(sound->source_id, AL_VELOCITY, 0.0f, 0.0f, 0.0f);
+		alSourcef(sound->source_id, AL_REFERENCE_DISTANCE, 10.0f);
 	}
 
 	bool updateSoundGain(int id, float gain)

@@ -21,7 +21,6 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "guiConfirmRegistration.h"
 #include "client/client.h"
 #include "client/sound.h"
-#include "filesys.h"
 #include "guiBackgroundImage.h"
 #include "guiButton.h"
 #include "guiEditBoxWithScrollbar.h"
@@ -34,10 +33,6 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #ifdef HAVE_TOUCHSCREENGUI
 	#include "client/renderingengine.h"
-#endif
-
-#ifdef _IRR_COMPILE_WITH_SDL_DEVICE_
-	#include <SDL3/SDL.h>
 #endif
 
 #include "gettext.h"
@@ -140,10 +135,9 @@ void GUIConfirmRegistration::regenerateGui(v2u32 screensize)
 		porting::mt_snprintf(info_text_buf, sizeof(info_text_buf),
 				info_text_template.c_str(), m_playername.c_str());
 
-		wchar_t *info_text_buf_wide = utf8_to_wide_c(info_text_buf);
-		gui::IGUIEditBox *e = new GUIEditBoxWithScrollBar(info_text_buf_wide, true,
-				Environment, this, ID_intotext, rect2, false, true);
-		delete[] info_text_buf_wide;
+		std::wstring info_text_w = utf8_to_wide(info_text_buf);
+		gui::IGUIEditBox *e = new GUIEditBoxWithScrollBar(info_text_w.c_str(),
+				true, Environment, this, ID_intotext, rect2, false, true);
 		e->drop();
 		e->setMultiLine(true);
 		e->setWordWrap(true);

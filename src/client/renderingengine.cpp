@@ -19,7 +19,6 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 */
 
 #include <IrrlichtDevice.h>
-#include <irrlicht.h>
 #include "filesys.h"
 #include "fontengine.h"
 #include "client.h"
@@ -35,6 +34,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "minimap.h"
 #include "clientmap.h"
 #include "renderingengine.h"
+#include "shader.h"
 #include "render/core.h"
 #if 0
 #include "render/factory.h"
@@ -70,6 +70,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #endif
 
 RenderingEngine *RenderingEngine::s_singleton = nullptr;
+std::string RenderingEngine::s_engine_error;
 
 
 class LoadScreenRoot : public gui::IGUIElement
@@ -138,7 +139,6 @@ RenderingEngine::RenderingEngine(IEventReceiver *receiver)
 
 	// bpp, fsaa, vsync
 	bool vsync = g_settings->getBool("vsync");
-	u16 bits = g_settings->getU16("fullscreen_bpp");
 	u16 fsaa = g_settings->getU16("fsaa");
 
 	// stereo buffer required for pageflip stereo
@@ -147,39 +147,53 @@ RenderingEngine::RenderingEngine(IEventReceiver *receiver)
 	// Determine driver
 #if defined(_IRR_COMPILE_WITH_ANGLE_)
 	video::E_DRIVER_TYPE driverType = video::EDT_ANGLE;
+#elif defined(_IRR_COMPILE_WITH_METAL_)
+	video::E_DRIVER_TYPE driverType = video::EDT_METAL;
 #elif defined(__ANDROID__) || defined(__IOS__)
 	video::E_DRIVER_TYPE driverType = video::EDT_OGLES2;
 #else
 	video::E_DRIVER_TYPE driverType = video::EDT_OPENGL;
 #endif
-	const std::string &driverstring = g_settings->get("video_driver");
 	std::vector<video::E_DRIVER_TYPE> drivers =
 			RenderingEngine::getSupportedVideoDrivers();
-	u32 i;
-	for (i = 0; i != drivers.size(); i++) {
-		if (!strcasecmp(driverstring.c_str(),
-				RenderingEngine::getVideoDriverName(drivers[i]))) {
-			driverType = drivers[i];
-			break;
+	auto indexOf = [&drivers](const std::string &name) {
+		u32 i = 0;
+		while (i < drivers.size() && strcasecmp(name.c_str(),
+				RenderingEngine::getVideoDriverInfo(drivers[i]).name.c_str()))
+			i++;
+		return i;
+	};
+	u32 i = indexOf(g_settings->get("video_driver"));
+#ifdef __ANDROID__
+	// The driver for this device, unless the player set one the build has
+	if (!g_settings->existsLocal("video_driver") || i == drivers.size()) {
+		const std::string recommended = porting::getRecommendedDriver();
+		if (!recommended.empty()) {
+			actionstream << "Recommended video driver " << recommended << std::endl;
+			i = indexOf(recommended);
 		}
 	}
+#endif
+	// A name the build does not have, as a typo in /set, leaves the platform's driver
 	if (i == drivers.size()) {
-		errorstream << "Invalid video_driver specified; "
-			       "defaulting to opengl"
-			    << std::endl;
+		errorstream << "Invalid video_driver specified; defaulting to "
+				<< RenderingEngine::getVideoDriverInfo(driverType).name << std::endl;
+		i = indexOf(RenderingEngine::getVideoDriverInfo(driverType).name);
 	}
+	if (i < drivers.size())
+		driverType = drivers[i];
 
 	SIrrlichtCreationParameters params = SIrrlichtCreationParameters();
+	if (g_logger.getTraceEnabled())
+		params.LoggingLevel = irr::ELL_DEBUG;
 	params.DriverType = driverType;
 	params.WindowSize = core::dimension2d<u32>(screen_w, screen_h);
-	params.Bits = bits;
 	params.AntiAlias = fsaa;
 	params.Fullscreen = fullscreen;
 	params.Stencilbuffer = false;
 	params.Stereobuffer = stereo_buffer;
 	params.Vsync = vsync;
 	params.EventReceiver = receiver;
-	params.HighPrecisionFPU = g_settings->getBool("high_precision_fpu");
 	params.ZBufferBits = 24;
 #if ENABLE_GLES
 	// there is no standardized path for these on desktop
@@ -189,12 +203,27 @@ RenderingEngine::RenderingEngine(IEventReceiver *receiver)
 #endif
 
 	m_device = createDeviceEx(params);
-#if defined(__ANDROID__) || defined(__IOS__)
+	// A driver that does not start hands over to the next one the build has
+	while (!m_device && ++i < drivers.size()) {
+		warningstream << RenderingEngine::getVideoDriverInfo(driverType).name <<
+				" did not start, the game goes on with "
+				<< RenderingEngine::getVideoDriverInfo(drivers[i]).name << std::endl;
+		driverType = drivers[i];
+		params.DriverType = driverType;
+		m_device = createDeviceEx(params);
+	}
+#if defined(__ANDROID__) || defined(__APPLE__)
+	// SDL names a window that did not open, Irrlicht a driver that did not start
+	const char *sdl_error = SDL_GetError();
 	FATAL_ERROR_IF(!m_device, ("Device create failed. Driver Type: \"" +
-			std::string(RenderingEngine::getVideoDriverName(driverType)) +
-			"\". SDL: " + SDL_GetError()).c_str());
+			RenderingEngine::getVideoDriverInfo(driverType).name + "\". " +
+			(sdl_error &&
+			*sdl_error ?
+			"SDL: " + std::string(sdl_error) : "Irrlicht: " + s_engine_error)).c_str());
 #endif
 	driver = m_device->getVideoDriver();
+
+	registerPrecompiledShaders(driver);
 
 	// Textures live on the GPU, a copy in main memory only doubles their cost
 	driver->setTextureCreationFlag(video::ETCF_ALLOW_MEMORY_COPY, false);
@@ -220,7 +249,7 @@ RenderingEngine::RenderingEngine(IEventReceiver *receiver)
 	set_default_settings();
 #endif
 
-	m_last_time = porting::getTimeMs();
+	m_last_time = porting::getAwakeTimeUs() / 1000;
 }
 
 RenderingEngine::~RenderingEngine()
@@ -231,7 +260,17 @@ RenderingEngine::~RenderingEngine()
 	s_singleton = nullptr;
 }
 
-v2u32 RenderingEngine::getWindowSize() const
+bool RenderingEngine::run()
+{
+	// A driver that lost its device draws nothing more: the game ends instead of freezing
+	if (driver->checkDriverReset()) {
+		errorstream << "The video driver lost its device" << std::endl;
+		return false;
+	}
+	return m_device->run();
+}
+
+v2u32 RenderingEngine::_getWindowSize() const
 {
 	if (core)
 		return core->getVirtualSize();
@@ -243,58 +282,18 @@ void RenderingEngine::setResizable(bool resize)
 	m_device->setResizable(resize);
 }
 
-bool RenderingEngine::print_video_modes()
+void RenderingEngine::removeMesh(const scene::IMesh* mesh)
 {
-	IrrlichtDevice *nulldevice;
+	m_device->getSceneManager()->getMeshCache()->removeMesh(mesh);
+}
 
-	bool vsync = g_settings->getBool("vsync");
-	u16 fsaa = g_settings->getU16("fsaa");
-	MyEventReceiver *receiver = new MyEventReceiver();
-
-	SIrrlichtCreationParameters params = SIrrlichtCreationParameters();
-	params.DriverType = video::EDT_NULL;
-	params.WindowSize = core::dimension2d<u32>(640, 480);
-	params.Bits = 24;
-	params.AntiAlias = fsaa;
-	params.Fullscreen = false;
-	params.Stencilbuffer = false;
-	params.Vsync = vsync;
-	params.EventReceiver = receiver;
-	params.HighPrecisionFPU = g_settings->getBool("high_precision_fpu");
-
-	nulldevice = createDeviceEx(params);
-
-	if (!nulldevice) {
-		delete receiver;
-		return false;
+void RenderingEngine::cleanupMeshCache()
+{
+	auto mesh_cache = m_device->getSceneManager()->getMeshCache();
+	while (mesh_cache->getMeshCount() != 0) {
+		if (scene::IAnimatedMesh *mesh = mesh_cache->getMeshByIndex(0))
+			mesh_cache->removeMesh(mesh);
 	}
-
-	std::cout << _("Available video modes (WxHxD):") << std::endl;
-
-	video::IVideoModeList *videomode_list = nulldevice->getVideoModeList();
-
-	if (videomode_list != NULL) {
-		s32 videomode_count = videomode_list->getVideoModeCount();
-		core::dimension2d<u32> videomode_res;
-		s32 videomode_depth;
-		for (s32 i = 0; i < videomode_count; ++i) {
-			videomode_res = videomode_list->getVideoModeResolution(i);
-			videomode_depth = videomode_list->getVideoModeDepth(i);
-			std::cout << videomode_res.Width << "x" << videomode_res.Height
-				  << "x" << videomode_depth << std::endl;
-		}
-
-		std::cout << _("Active video mode (WxHxD):") << std::endl;
-		videomode_res = videomode_list->getDesktopResolution();
-		videomode_depth = videomode_list->getDesktopDepth();
-		std::cout << videomode_res.Width << "x" << videomode_res.Height << "x"
-			  << videomode_depth << std::endl;
-	}
-
-	nulldevice->drop();
-	delete receiver;
-
-	return videomode_list != NULL;
 }
 
 bool RenderingEngine::setupTopLevelWindow(const std::string &name)
@@ -379,7 +378,7 @@ void RenderingEngine::setupTopLevelXorgWindow(const std::string &name)
 	// force a shutdown of an application if it doesn't respond to the destroy
 	// window message.
 
-	verbosestream << "Client: Setting Xorg _NET_WM_PID extened window manager property"
+	verbosestream << "Client: Setting Xorg _NET_WM_PID extended window manager property"
 		<< std::endl;
 
 	Atom NET_WM_PID = XInternAtom(x11_dpl, "_NET_WM_PID", false);
@@ -563,7 +562,7 @@ bool RenderingEngine::setXorgWindowIconFromPath(const std::string &icon_file)
 	Text will be removed when the screen is drawn the next time.
 	Additionally, a progressbar can be drawn when percent is set between 0 and 100.
 */
-void RenderingEngine::_draw_load_screen(const std::wstring &text,
+void RenderingEngine::draw_load_screen(const std::wstring &text,
 		gui::IGUIEnvironment *guienv, ITextureSource *tsrc, float dtime,
 		int percent)
 {
@@ -576,7 +575,7 @@ void RenderingEngine::_draw_load_screen(const std::wstring &text,
 #endif
 
 	float fps_max = std::min(g_settings->getFloat("fps_max"), 30.0f);
-	u64 cur_time = porting::getTimeMs();
+	u64 cur_time = porting::getAwakeTimeUs() / 1000;
 	m_load_screen_dtime += dtime;
 
 	if (cur_time - m_last_time < 1000.0f / fps_max && percent == m_percent)
@@ -606,7 +605,11 @@ void RenderingEngine::_draw_load_screen(const std::wstring &text,
 #ifdef HAVE_TOUCHSCREENGUI
 	const s32 bar_w = MYMIN(window.X * 0.5f, window.Y * 2.0f);
 #else
-	const s32 bar_w = 7.5 * (MYMIN(window.X, window.Y) * 0.9 / 15.0);
+	s32 bar_w = 7.5 * (MYMIN(window.X, window.Y) * 0.9 / 15.0);
+#if defined(__MACH__) && defined(__APPLE__) && !defined(__IOS__)
+	if (porting::getScreenScale() <= 1.0f)
+		bar_w = bar_w * 128 / 96;
+#endif
 #endif
 	const s32 bar_h = art.Width > 0 ? bar_w * art.Height / art.Width : bar_w / 8;
 	const s32 bar_x = (s32)window.X / 2 - bar_w / 2;
@@ -700,7 +703,7 @@ void RenderingEngine::_draw_load_screen(const std::wstring &text,
 /*
 	Draws the menu scene including (optional) cloud background.
 */
-void RenderingEngine::_draw_menu_scene(gui::IGUIEnvironment *guienv,
+void RenderingEngine::draw_menu_scene(gui::IGUIEnvironment *guienv,
 		ITextureSource *tsrc, float dtime)
 {
 	_draw_load_bg(guienv, tsrc, dtime);
@@ -803,10 +806,10 @@ bool RenderingEngine::handle_load_screen_touch(const SEvent &event)
 		return false;
 	}
 
-	return get_gui_env()->postEventFromUser(mouse);
+	return s_singleton->get_gui_env()->postEventFromUser(mouse);
 }
 
-void RenderingEngine::_draw_load_cleanup()
+void RenderingEngine::draw_load_cleanup()
 {
 	if (m_load_text) {
 		m_load_text->remove();
@@ -834,38 +837,24 @@ void RenderingEngine::_draw_load_cleanup()
 	m_percent = 0;
 }
 
-std::vector<core::vector3d<u32>> RenderingEngine::getSupportedVideoModes()
-{
-	IrrlichtDevice *nulldevice = createDevice(video::EDT_NULL);
-	sanity_check(nulldevice);
-
-	std::vector<core::vector3d<u32>> mlist;
-	video::IVideoModeList *modelist = nulldevice->getVideoModeList();
-
-	s32 num_modes = modelist->getVideoModeCount();
-	for (s32 i = 0; i != num_modes; i++) {
-		core::dimension2d<u32> mode_res = modelist->getVideoModeResolution(i);
-		u32 mode_depth = (u32)modelist->getVideoModeDepth(i);
-		mlist.emplace_back(mode_res.Width, mode_res.Height, mode_depth);
-	}
-
-	nulldevice->drop();
-	return mlist;
-}
-
+// The build's drivers, preferred first
 std::vector<irr::video::E_DRIVER_TYPE> RenderingEngine::getSupportedVideoDrivers()
 {
+	static const irr::video::E_DRIVER_TYPE preferred[] = {
+		irr::video::EDT_VULKAN,
+		irr::video::EDT_METAL,
+		irr::video::EDT_ANGLE,
+		irr::video::EDT_OGLES2,
+		irr::video::EDT_OPENGL,
+	};
 	std::vector<irr::video::E_DRIVER_TYPE> drivers;
-
-	for (int i = 0; i != irr::video::EDT_COUNT; i++) {
-		if (irr::IrrlichtDevice::isDriverSupported((irr::video::E_DRIVER_TYPE)i))
-			drivers.push_back((irr::video::E_DRIVER_TYPE)i);
-	}
-
+	for (irr::video::E_DRIVER_TYPE type : preferred)
+		if (irr::IrrlichtDevice::isDriverSupported(type))
+			drivers.push_back(type);
 	return drivers;
 }
 
-void RenderingEngine::_initialize(Client *client, Hud *hud)
+void RenderingEngine::initialize(Client *client, Hud *hud)
 {
 #if 0
 	const std::string &draw_mode = g_settings->get("3d_mode");
@@ -875,12 +864,12 @@ void RenderingEngine::_initialize(Client *client, Hud *hud)
 	core->initialize();
 }
 
-void RenderingEngine::_finalize()
+void RenderingEngine::finalize()
 {
 	core.reset();
 }
 
-void RenderingEngine::_clear_irrlicht_texture_cache()
+void RenderingEngine::clear_irrlicht_texture_cache()
 {
 	for (u32 i = 0; i < driver->getTextureCount(); i++) {
 		irr::video::ITexture *texture = driver->getTextureByIndex(i);
@@ -896,46 +885,23 @@ void RenderingEngine::_clear_irrlicht_texture_cache()
 	}
 }
 
-void RenderingEngine::_draw_scene(video::SColor skycolor, bool show_hud,
+void RenderingEngine::draw_scene(video::SColor skycolor, bool show_hud,
 		bool show_minimap, bool draw_wield_tool, bool draw_crosshair, bool draw_nametags)
 {
 	core->draw(skycolor, show_hud, show_minimap, draw_wield_tool, draw_crosshair, draw_nametags);
 }
 
-const char *RenderingEngine::getVideoDriverName(irr::video::E_DRIVER_TYPE type)
+const VideoDriverInfo &RenderingEngine::getVideoDriverInfo(irr::video::E_DRIVER_TYPE type)
 {
-	static const char *driver_ids[] = {
-			"null",
-			"software",
-			"burningsvideo",
-			"direct3d8",
-			"direct3d9",
-			"opengl",
-			"ogles1",
-			"ogles2",
-			"webgl1",
-			"angle",
+	static const std::unordered_map<int, VideoDriverInfo> driver_info_map = {
+		{(int)video::EDT_NULL,   {"null",   "NULL Driver"}},
+		{(int)video::EDT_OPENGL, {"opengl", "OpenGL"}},
+		{(int)video::EDT_OGLES2, {"ogles2", "OpenGL ES2"}},
+		{(int)video::EDT_ANGLE,  {"angle",  "ANGLE"}},
+		{(int)video::EDT_METAL,  {"metal",  "Metal"}},
+		{(int)video::EDT_VULKAN, {"vulkan", "Vulkan"}},
 	};
-
-	return driver_ids[type];
-}
-
-const char *RenderingEngine::getVideoDriverFriendlyName(irr::video::E_DRIVER_TYPE type)
-{
-	static const char *driver_names[] = {
-			"NULL Driver",
-			"Software Renderer",
-			"Burning's Video",
-			"Direct3D 8",
-			"Direct3D 9",
-			"OpenGL",
-			"OpenGL ES1",
-			"OpenGL ES2",
-			"WebGL 1",
-			"ANGLE",
-	};
-
-	return driver_names[type];
+	return driver_info_map.at((int)type);
 }
 
 float RenderingEngine::getScreenScale()
@@ -981,16 +947,18 @@ float RenderingEngine::getHudScaling()
 		static v2u32 fitted_size;
 		static float fitted_scaling = 1.0f;
 
-#ifdef HAVE_TOUCHSCREENGUI
-		const v2u32 size = getDisplaySize();
-#else
-		const RenderingEngine *engine = get_instance();
-		const v2u32 size = engine ? engine->getWindowSize() : v2u32(0, 0);
-#endif
+		const v2u32 size = getWindowSize();
 		if (size.X > 0 && size.Y > 0) {
 			if (size != fitted_size) {
 				fitted_size = size;
-				fitted_scaling = getAutoHudScaling(size, getDisplayDensity());
+#ifdef __IOS__
+				// as the touch screen GUI shifts it
+				const bool shifted_joystick = isDevice6and9Inch();
+#else
+				const bool shifted_joystick = false;
+#endif
+				fitted_scaling = getAutoHudScaling(size, getDisplayDensity(),
+						shifted_joystick);
 			}
 			return fitted_scaling;
 		}
@@ -1082,26 +1050,7 @@ float RenderingEngine::getDisplayDensity()
 
 #endif
 
-v2u32 RenderingEngine::getDisplaySize()
-{
-	IrrlichtDevice *nulldevice = createDevice(video::EDT_NULL);
-
-	core::dimension2d<u32> deskres =
-			nulldevice->getVideoModeList()->getDesktopResolution();
-	nulldevice->drop();
-
-	return deskres;
-}
-
 #else // __ANDROID__/__IOS__
-
-v2u32 RenderingEngine::getDisplaySize()
-{
-	const RenderingEngine *engine = RenderingEngine::get_instance();
-	if (engine == nullptr)
-		return v2u32(0, 0);
-	return engine->getWindowSize();
-}
 
 int RenderingEngine::getWindowSafeArea()
 {
@@ -1109,7 +1058,7 @@ int RenderingEngine::getWindowSafeArea()
 	// don't make it static
 	return MultiCraft::getScreenRound();
 #elif defined(_IRR_COMPILE_WITH_SDL_DEVICE_)
-	RenderingEngine *engine = RenderingEngine::get_instance();
+	RenderingEngine *engine = s_singleton;
 
 	if (engine) {
 		video::IVideoDriver* driver = engine->getVideoDriver();
@@ -1159,7 +1108,7 @@ bool RenderingEngine::isHighDpi()
 void RenderingEngine::startTextInput()
 {
 #ifdef _IRR_COMPILE_WITH_SDL_DEVICE_
-	RenderingEngine *engine = RenderingEngine::get_instance();
+	RenderingEngine *engine = s_singleton;
 
 	SDL_SetHint(SDL_HINT_ENABLE_SCREEN_KEYBOARD, porting::hasRealKeyboard() ? "0" : "1");
 #ifdef __ANDROID__
@@ -1184,7 +1133,7 @@ void RenderingEngine::startTextInput()
 void RenderingEngine::stopTextInput()
 {
 #ifdef _IRR_COMPILE_WITH_SDL_DEVICE_
-	RenderingEngine *engine = RenderingEngine::get_instance();
+	RenderingEngine *engine = s_singleton;
 
 	if (engine && porting::hasRealKeyboard()) {
 		video::IVideoDriver* driver = engine->getVideoDriver();

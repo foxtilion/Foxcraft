@@ -19,7 +19,32 @@ builddir="$( cd "$builddir" && pwd )"
 packagedir=$builddir/packages
 libdir=$builddir/libs
 
-toolchain_file=$dir/toolchain_x86_64-w64-mingw32.cmake
+# Test which win64 compiler is present
+command -v x86_64-w64-mingw32-gcc >/dev/null &&
+	compiler=x86_64-w64-mingw32-gcc
+command -v x86_64-w64-mingw32-gcc-posix >/dev/null &&
+	compiler=x86_64-w64-mingw32-gcc-posix
+
+if [ -z "$compiler" ]; then
+	echo "Unable to determine which MinGW compiler to use"
+	exit 1
+fi
+toolchain_file=$dir/toolchain_${compiler/-gcc/}.cmake
+echo "Using $toolchain_file"
+
+# Try to find runtime DLLs in various paths (varies by distribution, sigh)
+tmp=$(dirname "$(command -v $compiler)")/..
+runtime_dlls=
+for name in lib{gcc_,stdc++-,winpthread-}'*'.dll; do
+	for dir in $tmp/x86_64-w64-mingw32/{bin,lib} $tmp/lib/gcc/x86_64-w64-mingw32/*; do
+		[ -d "$dir" ] || continue
+		file=$(echo $dir/$name)
+		[ -f "$file" ] && { runtime_dlls+="$file;"; break; }
+	done
+done
+[ -z "$runtime_dlls" ] &&
+	echo "The compiler runtime DLLs could not be found, they might be missing in the final package."
+
 irrlicht_version=1.8.4
 ogg_version=1.3.5
 vorbis_version=1.3.7
@@ -67,7 +92,6 @@ cd $builddir
 	-c -O $packagedir/openal_stripped.zip
 [ -e $packagedir/SDL3-devel-$sdl_version-mingw.zip ] || wget https://github.com/libsdl-org/SDL/releases/download/release-$sdl_version/SDL3-devel-$sdl_version-mingw.zip \
 	-c -O $packagedir/SDL3-devel-$sdl_version-mingw.zip
-
 
 # Extract stuff
 cd $libdir
@@ -158,37 +182,42 @@ if [ ! -d irrlicht ]; then
 	cd -
 fi
 
-# Get minetest
-cd $builddir
-if [ ! "x$EXISTING_MINETEST_DIR" = "x" ]; then
-	cd /$EXISTING_MINETEST_DIR # must be absolute path
+# Set source dir, downloading Minetest as needed
+if [ -n "$EXISTING_MINETEST_DIR" ]; then
+	sourcedir="$( cd "$EXISTING_MINETEST_DIR" && pwd )"
 else
-	[ -d $CORE_NAME ] && (cd $CORE_NAME && git pull) || (git clone -b $CORE_BRANCH $CORE_GIT)
-	cd $CORE_NAME
+	cd $builddir
+	sourcedir=$PWD/$CORE_NAME
+	[ -d $CORE_NAME ] && { pushd $CORE_NAME; git pull; popd; } || \
+		git clone -b $CORE_BRANCH $CORE_GIT $CORE_NAME
+	if [ -z "$NO_MINETEST_GAME" ]; then
+		cd $sourcedir
+		[ -d games/$GAME_NAME ] && { pushd games/$GAME_NAME; git pull; popd; } || \
+			git clone -b $GAME_BRANCH $GAME_GIT games/$GAME_NAME
+	fi
 fi
-git_hash=$(git rev-parse --short HEAD)
 
-# Get minetest_game
-if [ "x$NO_MINETEST_GAME" = "x" ]; then
-	cd games
-	[ -d $GAME_NAME ] && (cd $GAME_NAME && git pull) || (git clone -b $GAME_BRANCH $GAME_GIT)
-	cd ..
-fi
+git_hash=$(cd $sourcedir && git rev-parse --short HEAD)
 
 # Build the thing
-[ -d _build ] && rm -Rf _build/
-mkdir _build
-cd _build
-cmake .. \
+cd $builddir
+[ -d build ] && rm -rf build
+mkdir build
+cd build
+
+vorbis_dlls=$(echo $libdir/libvorbis/bin/libvorbis{,file}-*.dll | tr ' ' ';')
+gettext_dlls=$(echo $libdir/gettext/bin/lib{intl,iconv}-*.dll | tr ' ' ';')
+
+cmake -S $sourcedir -B . \
 	-DCMAKE_TOOLCHAIN_FILE=$toolchain_file \
 	-DCMAKE_INSTALL_PREFIX=/tmp \
 	-DVERSION_EXTRA=$git_hash \
 	-DBUILD_CLIENT=1 -DBUILD_SERVER=0 \
+	-DEXTRA_DLL="$runtime_dlls" \
 	\
 	-DENABLE_SOUND=1 \
 	-DENABLE_CURL=1 \
 	-DENABLE_GETTEXT=1 \
-	-DENABLE_FREETYPE=1 \
 	-DENABLE_LEVELDB=1 \
 	\
 	-DUSE_STATIC_BUILD=1 \
@@ -210,7 +239,7 @@ cmake .. \
 	-DIRRLICHT_LIBRARY=$libdir/irrlicht/lib/Win32-gcc/libIrrlicht.a \
 	\
 	-DZLIB_INCLUDE_DIR=$libdir/zlib/include \
-	-DZLIB_LIBRARIES=$libdir/zlib/lib/libz.a \
+	-DZLIB_LIBRARY=$libdir/zlib/lib/libz.a \
 	\
 	-DPNG_INCLUDE_DIR="$libdir/libpng/include" \
 	-DPNG_LIBRARIES="$libdir/libpng/build/libpng16.a" \
@@ -231,9 +260,8 @@ cmake .. \
 	\
 	-DVORBIS_INCLUDE_DIR=$libdir/libvorbis/include \
 	-DVORBIS_LIBRARY=$libdir/libvorbis/lib/libvorbis.dll.a \
-	-DVORBIS_DLL=$libdir/libvorbis/bin/libvorbis-0.dll \
+	-DVORBIS_DLL="$vorbis_dlls" \
 	-DVORBISFILE_LIBRARY=$libdir/libvorbis/lib/libvorbisfile.dll.a \
-	-DVORBISFILE_DLL=$libdir/libvorbis/bin/libvorbisfile-3.dll \
 	\
 	-DOPENAL_INCLUDE_DIR=$libdir/openal_stripped/include/AL \
 	-DOPENAL_LIBRARY=$libdir/openal_stripped/lib/libOpenAL32.dll.a \
@@ -243,9 +271,8 @@ cmake .. \
 	-DCURL_INCLUDE_DIR=$libdir/libcurl/include \
 	-DCURL_LIBRARY=$libdir/libcurl/lib/libcurl.dll.a \
 	\
-	-DGETTEXT_MSGFMT=`which msgfmt` \
-	-DGETTEXT_DLL=$libdir/gettext/bin/libintl-8.dll \
-	-DGETTEXT_ICONV_DLL=$libdir/gettext/bin/libiconv-2.dll \
+	-DGETTEXT_MSGFMT=`command -v msgfmt` \
+	-DGETTEXT_DLL="$gettext_dlls" \
 	-DGETTEXT_INCLUDE_DIR=$libdir/gettext/include \
 	-DGETTEXT_LIBRARY=$libdir/gettext/lib/libintl.dll.a \
 	\
@@ -264,7 +291,7 @@ cmake .. \
 
 make -j$(nproc)
 
-[ "x$NO_PACKAGE" = "x" ] && make package
+[ -z "$NO_PACKAGE" ] && make package
 
 exit 0
 # EOF

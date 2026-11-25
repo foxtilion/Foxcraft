@@ -63,7 +63,7 @@ void set_default_settings()
 	settings->setDefault("client_unload_unused_data_timeout", "600");
 	settings->setDefault("client_mapblock_limit", "7500");
 	settings->setDefault("enable_build_where_you_stand", "false");
-	settings->setDefault("curl_timeout", "5000");
+	settings->setDefault("curl_timeout", "20000");
 	settings->setDefault("curl_parallel_limit", "8");
 	settings->setDefault("curl_file_download_timeout", "300000");
 	settings->setDefault("enable_remote_media_server", "true");
@@ -71,6 +71,8 @@ void set_default_settings()
 	settings->setDefault("max_out_chat_queue_size", "20");
 	settings->setDefault("pause_on_lost_focus", "true");
 	settings->setDefault("enable_register_confirmation", "true");
+	settings->setDefault("clickable_chat_weblinks", "false");
+	settings->setDefault("chat_weblink_color", "#8888FF");
 
 	// Keymap
 	settings->setDefault("remote_port", "30000");
@@ -86,7 +88,7 @@ void set_default_settings()
 	settings->setDefault("keymap_drop", "KEY_KEY_Q");
 	settings->setDefault("keymap_zoom", "KEY_KEY_Z");
 	settings->setDefault("keymap_inventory", "KEY_KEY_I");
-	settings->setDefault("keymap_special1", "KEY_KEY_E");
+	settings->setDefault("keymap_aux1", "KEY_KEY_E");
 	settings->setDefault("keymap_chat", "KEY_KEY_T");
 	settings->setDefault("keymap_cmd", "/");
 	settings->setDefault("keymap_cmd_local", ".");
@@ -103,6 +105,7 @@ void set_default_settings()
 	settings->setDefault("keymap_increase_volume", "");
 	settings->setDefault("keymap_decrease_volume", "");
 	settings->setDefault("keymap_cinematic", "");
+	settings->setDefault("keymap_toggle_block_bounds", "");
 	settings->setDefault("keymap_toggle_hud", "KEY_F1");
 	settings->setDefault("keymap_toggle_nametags", "KEY_F7");
 	settings->setDefault("keymap_toggle_chat", "KEY_F2");
@@ -158,8 +161,6 @@ void set_default_settings()
 	settings->setDefault("keymap_quicktune_inc", "KEY_PRIOR");
 
 	settings->setDefault("keymap_tabb", "KEY_TAB");
-	settings->setDefault("keymap_escape", "KEY_ESCAPE");
-	settings->setDefault("keymap_overflow", "");
 
 	// Visuals
 #ifdef NDEBUG
@@ -187,12 +188,12 @@ void set_default_settings()
 	settings->setDefault("screen_h", "768");
 	settings->setDefault("autosave_screensize", "true");
 	settings->setDefault("fullscreen", "false");
-	settings->setDefault("fullscreen_bpp", "24");
 	settings->setDefault("vsync", "true");
 	settings->setDefault("fov", "72");
 	settings->setDefault("leaves_style", "fancy");
 	settings->setDefault("connected_glass", "false");
 	settings->setDefault("smooth_lighting", "true");
+	settings->setDefault("performance_tradeoffs", "false");
 	settings->setDefault("lighting_alpha", "0.0");
 	settings->setDefault("lighting_beta", "1.5");
 	settings->setDefault("display_gamma", "1.0");
@@ -203,6 +204,8 @@ void set_default_settings()
 	settings->setDefault("shader_path", "");
 #if defined(_IRR_COMPILE_WITH_ANGLE_)
 	settings->setDefault("video_driver", "angle");
+#elif defined(_IRR_COMPILE_WITH_METAL_)
+	settings->setDefault("video_driver", "metal");
 #elif ENABLE_GLES
 	settings->setDefault("video_driver", "ogles2");
 #else
@@ -241,7 +244,6 @@ void set_default_settings()
 	settings->setDefault("round_screen", "0");
 	settings->setDefault("enable_local_map_saving", "false");
 	settings->setDefault("show_entity_selectionbox", "false");
-	settings->setDefault("transparency_sorting", "true");
 	settings->setDefault("texture_clean_transparent", "false");
 	settings->setDefault("texture_min_size", "0");
 	settings->setDefault("ambient_occlusion_gamma", "1.8");
@@ -269,6 +271,18 @@ void set_default_settings()
 	settings->setDefault("enable_waving_leaves", "false");
 	settings->setDefault("enable_waving_plants", "false");
 
+	// Effects Shadows
+	settings->setDefault("enable_dynamic_shadows", "false");
+	settings->setDefault("shadow_strength", "0.2");
+	settings->setDefault("shadow_map_max_distance", "200.0");
+	settings->setDefault("shadow_map_texture_size", "2048");
+	settings->setDefault("shadow_map_texture_32bit", "true");
+	settings->setDefault("shadow_map_color", "false");
+	settings->setDefault("shadow_filters", "1");
+	settings->setDefault("shadow_poisson_filter", "true");
+	settings->setDefault("shadow_update_frames", "8");
+	settings->setDefault("shadow_soft_radius", "1.0");
+	settings->setDefault("shadow_sky_body_orbit_tilt", "0.0");
 
 	// Input
 	settings->setDefault("invert_mouse", "false");
@@ -297,9 +311,7 @@ void set_default_settings()
 	settings->setDefault("main_menu_path", "");
 	settings->setDefault("serverlist_file", "favoriteservers.json");
 
-#if USE_FREETYPE
-	settings->setDefault("freetype", "true");
-
+	// General font settings
 	settings->setDefault("font_path", porting::getDataPath("fonts" DIR_DELIM "MultiCraftFont.ttf"));
 	settings->setDefault("font_path_italic", "");
 	settings->setDefault("font_path_bold", "");
@@ -309,11 +321,13 @@ void set_default_settings()
 	settings->setDefault("font_italic", "false");
 	settings->setDefault("font_shadow", "1");
 	settings->setDefault("font_shadow_alpha", "127");
+	settings->setDefault("font_size_divisible_by", "1");
 
 	settings->setDefault("mono_font_path", porting::getDataPath("fonts" DIR_DELIM "MultiCraftFont.ttf"));
 	settings->setDefault("mono_font_path_italic", "");
 	settings->setDefault("mono_font_path_bold", "");
 	settings->setDefault("mono_font_path_bold_italic", "");
+	settings->setDefault("mono_font_size_divisible_by", "1");
 
 	std::string emoji_fonts;
 	std::string emoji_flags_font;
@@ -336,18 +350,7 @@ void set_default_settings()
 
 	settings->setDefault("fallback_font_path", fallback_font);
 
-	settings->setDefault("fallback_font_shadow", "1");
-	settings->setDefault("fallback_font_shadow_alpha", "128");
-
 	std::string font_size_str = std::to_string(TTF_DEFAULT_FONT_SIZE);
-#else
-	settings->setDefault("freetype", "false");
-	settings->setDefault("font_path", porting::getDataPath("fonts" DIR_DELIM "mono_dejavu_sans"));
-	settings->setDefault("mono_font_path", porting::getDataPath("fonts" DIR_DELIM "mono_dejavu_sans"));
-
-	std::string font_size_str = std::to_string(DEFAULT_FONT_SIZE);
-#endif
-	// General font settings
 	settings->setDefault("font_size", font_size_str);
 	settings->setDefault("mono_font_size", font_size_str);
 	settings->setDefault("chat_font_size", "0"); // Default "font_size"
@@ -470,7 +473,7 @@ void set_default_settings()
 	// Mapgen
 	settings->setDefault("mg_name", "v7p");
 	settings->setDefault("water_level", "1");
-	settings->setDefault("mapgen_limit", "31000");
+	settings->setDefault("mapgen_limit", "31007");
 	settings->setDefault("chunksize", "5");
 	settings->setDefault("fixed_map_seed", "");
 	settings->setDefault("max_block_generate_distance", "10");
@@ -484,7 +487,6 @@ void set_default_settings()
 	settings->setDefault("server_name", "");
 	settings->setDefault("server_description", "");
 
-	settings->setDefault("high_precision_fpu", "true");
 	settings->setDefault("enable_console", "false");
 	settings->setDefault("screen_dpi", "72");
 	settings->setDefault("display_density_factor", "1");
@@ -508,9 +510,6 @@ void set_default_settings()
 	settings->setDefault("enable_waving_water", "true");
 	settings->setDefault("enable_waving_leaves", "true");
 	settings->setDefault("enable_waving_plants", "true");
-#else
-	// Shaders work but may reduce performance on iGPU
-	settings->setDefault("enable_shaders", "false");
 #endif
 #endif
 
@@ -519,7 +518,7 @@ void set_default_settings()
 	settings->setDefault("touchscreen_threshold", "20");
 	settings->setDefault("touch_sensitivity", "0.2");
 	settings->setDefault("fixed_virtual_joystick", "true");
-	settings->setDefault("virtual_joystick_triggers_aux", "false");
+	settings->setDefault("virtual_joystick_triggers_aux1", "false");
 	settings->setDefault("fast_move", "true");
 	settings->setDefault("dig_and_move", "false");
 #endif
@@ -529,6 +528,7 @@ void set_default_settings()
 #if !defined(_IRR_COMPILE_WITH_ANGLE_)
 	settings->setDefault("video_driver", "ogles2");
 #endif
+	settings->setDefault("performance_tradeoffs", "true");
 	settings->setDefault("emergequeue_limit_diskonly", "16");
 	settings->setDefault("emergequeue_limit_generate", "16");
 	settings->setDefault("gui_scaling_filter_txr2img", "false");
@@ -624,7 +624,7 @@ void set_default_settings()
 	if (porting::isGooglePC())
 		settings->setDefault("mouse_sensitivity", "0.8");
 
-	v2u32 window_size = RenderingEngine::getDisplaySize();
+	v2u32 window_size = RenderingEngine::getWindowSize();
 	if (window_size.X > 0) {
 		float x_inches = window_size.X / (160.f * RenderingEngine::getDisplayDensity());
 		if (x_inches <= 3.7) {

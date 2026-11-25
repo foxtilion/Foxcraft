@@ -36,9 +36,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "leveldb/db.h"
 #include "leveldb/cache.h"
 #include "leveldb/write_batch.h"
-#ifdef SERVER
 #include "leveldb/filter_policy.h"
-#endif
 
 static const size_t BATCH_FLUSH_BYTES = 8 * 1024 * 1024;
 static const size_t BATCH_KEEP_BYTES = 1024 * 1024;
@@ -54,12 +52,16 @@ Database_LevelDB::Database_LevelDB(const std::string &savedir)
 {
 	leveldb::Options options;
 	options.create_if_missing = true;
+	// LevelDB does not delete it and a world can be opened many times
+	static const leveldb::FilterPolicy *const filter_policy = leveldb::NewBloomFilterPolicy(10);
+	options.filter_policy = filter_policy;
 #ifdef SERVER
-	options.block_cache = leveldb::NewLRUCache(64 * 1024 * 1024); // x8 from default
+	options.block_cache = leveldb::NewLRUCache(32 * 1024 * 1024); // x4 from default
 	options.block_size = 32 * 1024; // x8 from default
-	options.write_buffer_size = 32 * 1024 * 1024; // x8 from default
+	options.write_buffer_size = 64 * 1024 * 1024; // x16 from default
 	options.max_file_size = 8 * 1024 * 1024; // x4 from default
-	options.filter_policy = leveldb::NewBloomFilterPolicy(10);
+#else
+	options.write_buffer_size = 8 * 1024 * 1024; // x2 from default
 #endif
 	leveldb::Status status = leveldb::DB::Open(options,
 		savedir + DIR_DELIM + "map.db", &m_database);
@@ -68,9 +70,7 @@ Database_LevelDB::Database_LevelDB(const std::string &savedir)
 
 void Database_LevelDB::beginSave()
 {
-#ifdef SERVER
 	m_batching = true;
-#endif
 }
 
 void Database_LevelDB::endSave()
@@ -131,11 +131,14 @@ bool Database_LevelDB::saveBlock(const v3s16 &pos, const std::string &data)
 
 void Database_LevelDB::loadBlock(const v3s16 &pos, std::string *block)
 {
-	std::string datastr;
 	leveldb::Status status = m_database->Get(leveldb::ReadOptions(),
-		i64tos(getBlockAsInteger(pos)), &datastr);
+		i64tos(getBlockAsInteger(pos)), block);
 
-	*block = (status.ok()) ? datastr : "";
+	if (status.IsNotFound()) {
+		block->clear();
+	} else {
+		ENSURE_STATUS_OK(status)
+	}
 }
 
 bool Database_LevelDB::deleteBlock(const v3s16 &pos)
@@ -199,7 +202,7 @@ void PlayerDatabaseLevelDB::savePlayer(RemotePlayer *player)
 	std::string (long) serialized_inventory
 	*/
 
-	std::ostringstream os;
+	std::ostringstream os(std::ios_base::binary);
 	writeU8(os, 1);
 
 	PlayerSAO *sao = player->getPlayerSAO();
@@ -210,7 +213,7 @@ void PlayerDatabaseLevelDB::savePlayer(RemotePlayer *player)
 	writeF32(os, sao->getRotation().Y);
 	writeU16(os, sao->getBreath());
 
-	StringMap stringvars = sao->getMeta().getStrings();
+	const auto &stringvars = sao->getMeta().getStrings();
 	writeU32(os, stringvars.size());
 	for (const auto &it : stringvars) {
 		os << serializeString16(it.first);
@@ -236,9 +239,11 @@ bool PlayerDatabaseLevelDB::loadPlayer(RemotePlayer *player, PlayerSAO *sao)
 	std::string raw;
 	leveldb::Status s = m_database->Get(leveldb::ReadOptions(),
 		player->getName(), &raw);
-	if (!s.ok())
+	if (s.IsNotFound())
 		return false;
-	std::istringstream is(raw);
+	ENSURE_STATUS_OK(s)
+
+	std::istringstream is(raw, std::ios_base::binary);
 
 	if (readU8(is) > 1)
 		return false;
@@ -275,7 +280,9 @@ void PlayerDatabaseLevelDB::listPlayers(std::vector<std::string> &res)
 	for (it->SeekToFirst(); it->Valid(); it->Next()) {
 		res.push_back(it->key().ToString());
 	}
+	leveldb::Status status = it->status();
 	delete it;
+	ENSURE_STATUS_OK(status);
 }
 
 AuthDatabaseLevelDB::AuthDatabaseLevelDB(const std::string &savedir)
@@ -296,9 +303,11 @@ bool AuthDatabaseLevelDB::getAuth(const std::string &name, AuthEntry &res)
 {
 	std::string raw;
 	leveldb::Status s = m_database->Get(leveldb::ReadOptions(), name, &raw);
-	if (!s.ok())
+	if (s.IsNotFound())
 		return false;
-	std::istringstream is(raw);
+	ENSURE_STATUS_OK(s)
+
+	std::istringstream is(raw, std::ios_base::binary);
 
 	/*
 	u8 version = 1
@@ -330,7 +339,7 @@ bool AuthDatabaseLevelDB::getAuth(const std::string &name, AuthEntry &res)
 
 bool AuthDatabaseLevelDB::saveAuth(const AuthEntry &authEntry)
 {
-	std::ostringstream os;
+	std::ostringstream os(std::ios_base::binary);
 	writeU8(os, 1);
 	os << serializeString16(authEntry.password);
 
@@ -366,7 +375,9 @@ void AuthDatabaseLevelDB::listNames(std::vector<std::string> &res)
 	for (it->SeekToFirst(); it->Valid(); it->Next()) {
 		res.emplace_back(it->key().ToString());
 	}
+	leveldb::Status status = it->status();
 	delete it;
+	ENSURE_STATUS_OK(status);
 }
 
 void AuthDatabaseLevelDB::reload()

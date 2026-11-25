@@ -407,20 +407,20 @@ static void getNodeTextureCoords(v3f base, const v3f &scale, const v3s16 &dir, f
 	if (dir.X > 0 || dir.Y != 0 || dir.Z < 0)
 		base -= scale;
 	if (dir == v3s16(0,0,1)) {
-		*u = -base.X - 1;
-		*v = -base.Y - 1;
+		*u = -base.X;
+		*v = -base.Y;
 	} else if (dir == v3s16(0,0,-1)) {
 		*u = base.X + 1;
-		*v = -base.Y - 2;
+		*v = -base.Y - 1;
 	} else if (dir == v3s16(1,0,0)) {
 		*u = base.Z + 1;
-		*v = -base.Y - 2;
-	} else if (dir == v3s16(-1,0,0)) {
-		*u = -base.Z - 1;
 		*v = -base.Y - 1;
+	} else if (dir == v3s16(-1,0,0)) {
+		*u = -base.Z;
+		*v = -base.Y;
 	} else if (dir == v3s16(0,1,0)) {
 		*u = base.X + 1;
-		*v = -base.Z - 2;
+		*v = -base.Z - 1;
 	} else if (dir == v3s16(0,-1,0)) {
 		*u = base.X + 1;
 		*v = base.Z + 1;
@@ -860,6 +860,9 @@ static void updateFastFaceRow(
 		g_settings->getBool("enable_shaders") &&
 		g_settings->getBool("enable_waving_water");
 
+	static thread_local const bool force_not_tiling =
+			false && g_settings->getBool("enable_dynamic_shadows");
+
 	v3s16 p = startpos;
 
 	u16 continuous_tiles_count = 1;
@@ -898,7 +901,8 @@ static void updateFastFaceRow(
 					waving,
 					next_tile);
 
-			if (next_makes_face == makes_face
+			if (!force_not_tiling
+					&& next_makes_face == makes_face
 					&& next_p_corrected == p_corrected + translate_dir
 					&& next_face_dir_corrected == face_dir_corrected
 					&& memcmp(next_lights, lights, sizeof(lights)) == 0
@@ -1003,6 +1007,57 @@ static void applyTileColor(PreMeshBuffer &pmb)
 	MapBlockMesh
 */
 
+void MapBlockMeshBuffer::pack()
+{
+	m_packed.assign(Vertices.const_pointer(), Vertices.const_pointer() + Vertices.size());
+	Vertices.clear();
+	m_is_packed = true;
+}
+
+video::E_VERTEX_TYPE MapBlockMeshBuffer::getVertexType() const
+{
+	return m_is_packed ? video::EVT_STANDARD_PACKED : video::EVT_STANDARD;
+}
+
+const void *MapBlockMeshBuffer::getVertices() const
+{
+	return m_is_packed ? (const void *)m_packed.data() : scene::SMeshBuffer::getVertices();
+}
+
+void *MapBlockMeshBuffer::getVertices()
+{
+	return m_is_packed ? (void *)m_packed.data() : scene::SMeshBuffer::getVertices();
+}
+
+u32 MapBlockMeshBuffer::getVertexCount() const
+{
+	return m_is_packed && !Released ? m_packed.size() : scene::SMeshBuffer::getVertexCount();
+}
+
+const v3f &MapBlockMeshBuffer::getPosition(u32 i) const
+{
+	return m_is_packed ? m_packed[i].Pos : scene::SMeshBuffer::getPosition(i);
+}
+
+v3f &MapBlockMeshBuffer::getPosition(u32 i)
+{
+	return m_is_packed ? m_packed[i].Pos : scene::SMeshBuffer::getPosition(i);
+}
+
+bool MapBlockMeshBuffer::releaseData()
+{
+	if (!m_is_packed)
+		return scene::SMeshBuffer::releaseData();
+	if (!Releasable || Released)
+		return Released;
+	ReleasedVertices = m_packed.size();
+	ReleasedIndices = Indices.size();
+	std::vector<video::S3DVertexPacked>().swap(m_packed);
+	Indices.clear();
+	Released = true;
+	return true;
+}
+
 MapBlockMesh::MapBlockMesh(MeshMakeData *data, v3s16 camera_offset):
 	m_minimap_mapblock(NULL),
 	m_tsrc(data->m_client->getTextureSource()),
@@ -1075,8 +1130,8 @@ MapBlockMesh::MapBlockMesh(MeshMakeData *data, v3s16 camera_offset):
 	*/
 
 	{
-		MapblockMeshGenerator generator(data, &collector);
-		generator.generate();
+		MapblockMeshGenerator(data, &collector,
+			data->m_client->getSceneManager()->getMeshManipulator()).generate();
 	}
 
 	/*
@@ -1176,10 +1231,14 @@ MapBlockMesh::MapBlockMesh(MeshMakeData *data, v3s16 camera_offset):
 			for (video::S3DVertex &v : p.vertices)
 				v.Pos += bake;
 
-			scene::SMeshBuffer *buf = new scene::SMeshBuffer();
+			MapBlockMeshBuffer *buf = new MapBlockMeshBuffer();
 			buf->Material = material;
+			// Without shaders animate() writes the vertices, so the driver may not take them
+			buf->setReleasable(m_enable_vbo && m_enable_shaders);
 			buf->append(&p.vertices[0], p.vertices.size(),
 				&p.indices[0], p.indices.size());
+			if (buf->Releasable)
+				buf->pack();
 			mesh->addMeshBuffer(buf);
 			buf->drop();
 		}

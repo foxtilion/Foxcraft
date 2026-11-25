@@ -24,7 +24,8 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <string>
 
 class InputHandler;
-class ChatBackend;  /* to avoid having to include chat.h */
+class ChatBackend;
+class RenderingEngine;
 struct SubgameSpec;
 struct GameStartData;
 
@@ -33,7 +34,7 @@ struct Jitter {
 };
 
 struct RunStats {
-	u32 drawtime;
+	u64 drawtime; // (us)
 
 	Jitter dtime_jitter, busy_time_jitter;
 };
@@ -43,12 +44,7 @@ struct CameraOrientation {
 	f32 camera_pitch;  // "up/down"
 };
 
-// before 1.8 there isn't a "integer interface", only float
-#if (IRRLICHT_VERSION_MAJOR == 1 && IRRLICHT_VERSION_MINOR < 8)
-typedef f32 SamplerLayer_t;
-#else
 typedef s32 SamplerLayer_t;
-#endif
 
 class GameGlobalShaderConstantSetter : public IShaderConstantSetter
 {
@@ -62,8 +58,6 @@ class GameGlobalShaderConstantSetter : public IShaderConstantSetter
 	CachedPixelShaderSetting<float> m_animation_timer_pixel;
 	CachedPixelShaderSetting<float, 3> m_day_light;
 	CachedPixelShaderSetting<float, 4> m_star_color;
-	CachedPixelShaderSetting<float, 3> m_eye_position_pixel;
-	CachedVertexShaderSetting<float, 3> m_eye_position_vertex;
 	CachedPixelShaderSetting<float, 3> m_minimap_yaw;
 	CachedPixelShaderSetting<float, 3> m_camera_offset_pixel;
 	CachedPixelShaderSetting<float, 3> m_camera_offset_vertex;
@@ -79,7 +73,6 @@ class GameGlobalShaderConstantSetter : public IShaderConstantSetter
 		float day_light[3];
 		float star_color[4];
 		float animation_timer;
-		float eye_position[3];
 		float camera_offset[3];
 		float minimap_yaw[3];
 		float point_lights[16];
@@ -121,6 +114,7 @@ public:
 
 void the_game(bool *kill,
 		InputHandler *input,
+		RenderingEngine *rendering_engine,
 		const GameStartData &start_data,
 		std::string &error_message,
 		ChatBackend &chat_backend,

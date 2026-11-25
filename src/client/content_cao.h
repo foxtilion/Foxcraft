@@ -21,6 +21,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #include <map>
 #include "irrlichttypes_extrabloated.h"
+#include "irr_ptr.h"
 #include "clientobject.h"
 #include "object_properties.h"
 #include "itemgroup.h"
@@ -178,6 +179,8 @@ public:
 
 	const bool isImmortal();
 
+	inline const ObjectProperties &getProperties() const { return m_prop; }
+
 	scene::ISceneNode *getSceneNode() const;
 
 	scene::IAnimatedMeshSceneNode *getAnimatedMeshSceneNode() const;
@@ -238,7 +241,7 @@ public:
 
 	void removeFromScene(bool permanent);
 
-	void addToScene(ITextureSource *tsrc);
+	void addToScene(ITextureSource *tsrc, scene::ISceneManager *smgr);
 
 	inline void expireVisuals()
 	{
@@ -267,6 +270,9 @@ public:
 	// ffs this HAS TO BE a string copy! See #5739 if you think otherwise
 	// Reason: updateTextures(m_previous_texture_modifier);
 	void updateTextures(std::string mod);
+
+	video::ITexture *pinTexture(ITextureSource *tsrc, const std::string &name);
+	std::vector<irr_ptr<video::ITexture>> m_pinned_textures;
 
 	void updateAnimation();
 

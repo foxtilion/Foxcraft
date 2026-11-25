@@ -35,13 +35,15 @@ public:
 	~NetworkPacket();
 
 	void putRawPacket(const u8 *data, u32 datasize, session_t peer_id);
+	void adoptPayload(std::vector<u8> &&payload, u16 command, session_t peer_id);
+	const std::vector<u8> &getPayload() const { return m_data; }
 	void clear();
 
 	// Getters
 	u32 getSize() const { return m_datasize; }
 	session_t getPeerId() const { return m_peer_id; }
 	u16 getCommand() { return m_command; }
-	const u32 getRemainingBytes() const { return m_datasize - m_read_offset; }
+	u32 getRemainingBytes() const { return m_datasize - m_read_offset; }
 	const char *getRemainingString() { return getString(m_read_offset); }
 
 	// Returns a c-string without copying.
