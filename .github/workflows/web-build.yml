@@ -141,136 +141,47 @@ jobs:
           cp zstd-src/lib/zdict.h zstd/include/
           cp zstd-src/lib/zstd_errors.h zstd/include/
           cp zstd-src/lib/libzstd.a zstd/lib/
+          - name: Build Irrlicht for WebAssembly
+            run: |
+              git clone --depth 1 https://github.com/minetest/irrlicht.git irrlicht-src
+              cd irrlicht-src
+              mkdir build && cd build
+
+              emcmake cmake .. \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DBUILD_SHARED_LIBS=OFF \
+                -DCMAKE_C_FLAGS="-sUSE_SDL=2" \
+                -DCMAKE_CXX_FLAGS="-sUSE_SDL=2"
+
+              cmake --build . --parallel 2>&1 | tee build.log || {
+                echo "=== FEHLER ==="
+                grep -n -E "error:|Error " build.log | head -40
+                exit 1
+              }
+
+      - name: Check dependencies
+        run: |
+          test -f "$GITHUB_WORKSPACE/zlib/lib/libz.a"
+          test -f "$GITHUB_WORKSPACE/libjpeg/lib/libjpeg.a"
+          test -f "$GITHUB_WORKSPACE/libpng/lib/libpng18.a"
 
       - name: Build Irrlicht for WebAssembly
         run: |
-          git clone --depth 1 --single-branch --verbose \
-          https://github.com/minetest/irrlicht.git irrlicht-src
-
-          echo "Checking dependencies:"
-          ls -l "$GITHUB_WORKSPACE/zlib/lib/libz.a"
-          ls -l "$GITHUB_WORKSPACE/zlib/include/zlib.h"
-          ls -l "$GITHUB_WORKSPACE/libjpeg/lib/libjpeg.a"
-          ls -l "$GITHUB_WORKSPACE/libjpeg/include/jpeglib.h"
-          ls -l "$GITHUB_WORKSPACE/libpng/lib/libpng18.a"
-          ls -l "$GITHUB_WORKSPACE/libpng/include/png.h"
-
-          echo "Emscripten GLES libraries:"
-          find "$EMSDK/upstream/emscripten/cache/sysroot/lib" \
-            -iname '*GLES*' -o -iname '*gl*' | head -50
-
-          echo "Emscripten SDL2 files:"
-          find "$EMSDK/upstream/emscripten/cache/sysroot" \
-            \( -iname '*SDL2*' -o -iname 'SDL.h' -o -iname 'SDL2Config.cmake' -o -iname 'sdl2-config.cmake' \) \
-            2>/dev/null | head -100
-
-          echo "Searching for SDL2 CMake files:"
-          find "$EMSDK/upstream/emscripten" \
-            \( -iname 'SDL2Config.cmake' -o -iname 'sdl2-config.cmake' \) \
-            2>/dev/null
-
-            echo "=== Inhalt der SDL2-CMake-Datei ==="
-            cat "$EMSDK/upstream/emscripten/tools/ports/sdl2/sdl2-config.cmake"
-            echo "=== Ende der SDL2-CMake-Datei ==="
-
-          mkdir irrlicht-src/build
-          echo "=== Searching for SDL_version.h ==="
-          find "$EMSDK/upstream/emscripten/cache/sysroot" \
-            -name "SDL_version.h" \
-            -print
-
-          echo "=== Searching for SDL2 headers ==="
-          find "$EMSDK/upstream/emscripten/cache/sysroot/include" \
-            -maxdepth 3 \
-            -type f \
-            -name "SDL*.h" \
-            -print | sort
-          cd irrlicht-src/build
-
-          echo "=== Irrlicht src/CMakeLists.txt around ZLIB ==="
-          echo "=== Irrlicht src/CMakeLists.txt around SDL2 version check ==="
-          sed -n '260,285p' ../src/CMakeLists.txt
-
-          echo "=== TEST: Variablen ==="
-          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
-          echo "ZLIB_LIBRARY=$GITHUB_WORKSPACE/zlib/lib/libz.a"
-          echo "ZLIB_INCLUDE_DIR=$GITHUB_WORKSPACE/zlib/include"
-          echo "JPEG_LIBRARY=$GITHUB_WORKSPACE/libjpeg/lib/libjpeg.a"
-          echo "PNG_LIBRARY=$GITHUB_WORKSPACE/libpng/lib/libpng18.a"
-
-          echo "=== TEST: Dateien ==="
-          ls -l "$GITHUB_WORKSPACE/zlib/lib/libz.a"
-          ls -l "$GITHUB_WORKSPACE/zlib/include/zlib.h"
-
-          echo "=== SDL2 version header ==="
-          cat "$EMSDK/upstream/emscripten/cache/sysroot/include/SDL/SDL_version.h" | head -80
-
-          echo "=== SDL2 include directories ==="
-          ls -ld "$EMSDK/upstream/emscripten/cache/sysroot/include/SDL2" || true
-          ls -ld "$EMSDK/upstream/emscripten/cache/sysroot/include/SDL" || true
-
-          echo "=== SDL2 version macros ==="
-          grep -n "SDL_VERSION" \
-            "$EMSDK/upstream/emscripten/cache/sysroot/include/SDL/SDL_version.h" | head -30
-
-          echo "=== SDL_COMPILEDVERSION ==="
-          grep -n "SDL_COMPILEDVERSION" \
-            "$EMSDK/upstream/emscripten/cache/sysroot/include/SDL/SDL_version.h"
-
-          echo "=== SDL_VERSIONNUM ==="
-          grep -n -A5 "SDL_VERSIONNUM" \
-            "$EMSDK/upstream/emscripten/cache/sysroot/include/SDL/SDL_version.h"
-
-          echo "=== Emscripten SDL port ==="
-          grep -n "version" \
-            "$EMSDK/upstream/emscripten/tools/ports/sdl2/sdl2.py" 2>/dev/null | head -30 || true
-
-
-          echo "=== SDL headers ==="
-          find "$EMSDK/upstream/emscripten/cache/sysroot/include" \
-            -name 'SDL_version.h' -print
-
-          echo "=== SDL version ==="
-          grep -E 'SDL_(MAJOR|MINOR|PATCHLEVEL)_VERSION|SDL_COMPILEDVERSION' \
-            "$EMSDK/upstream/emscripten/cache/sysroot/include/SDL/SDL_version.h" || true
-
-          echo "=== Emscripten SDL port files ==="
-          find "$EMSDK/upstream/emscripten/tools/ports/sdl2" -maxdepth 2 -type f -print
-
-          echo "=== emcc SDL test ==="
-          echo '#include <SDL_version.h>' > /tmp/sdltest.cpp
-          echo 'SDL_COMPILEDVERSION' >> /tmp/sdltest.cpp
-          em++ /tmp/sdltest.cpp -sUSE_SDL=2 -E | grep -E 'SDL_(MAJOR|MINOR|PATCHLEVEL|COMPILEDVERSION)' | head -20
-
-          echo "=== Emscripten EGL libraries ==="
-          find "$EMSDK/upstream/emscripten/cache/sysroot/lib/wasm32-emscripten" \
-            -maxdepth 1 -name 'libEGL*.a' -print
+          git clone --depth 1 https://github.com/minetest/irrlicht.git irrlicht-src
+          cd irrlicht-src
+          mkdir build && cd build
 
           emcmake cmake .. \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=OFF \
-            -DSDL2_DIR="$EMSDK/upstream/emscripten/tools/ports/sdl2" \
-            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/zlib;$GITHUB_WORKSPACE/libjpeg;$GITHUB_WORKSPACE/libpng" \
-            -DZLIB_LIBRARY="$GITHUB_WORKSPACE/zlib/lib/libz.a" \
-            -DZLIB_INCLUDE_DIR="$GITHUB_WORKSPACE/zlib/include" \
-            -DJPEG_LIBRARY="$GITHUB_WORKSPACE/libjpeg/lib/libjpeg.a" \
-            -DJPEG_INCLUDE_DIR="$GITHUB_WORKSPACE/libjpeg/include" \
-            -DPNG_LIBRARY="$GITHUB_WORKSPACE/libpng/lib/libpng18.a" \
-            -DPNG_PNG_INCLUDE_DIR="$GITHUB_WORKSPACE/libpng/include" \
-            -DOPENGLES2_LIBRARY="$EMSDK/upstream/emscripten/cache/sysroot/lib/wasm32-emscripten/libGL.a" \
-            -DEGL_LIBRARY="$EMSDK/upstream/emscripten/cache/sysroot/lib/wasm32-emscripten/libEGL.a"
-          
-          echo "=== Renderer declarations ==="
-          grep -R -n -E 'SDL_Renderer|Renderer|SDL_Window.*Window' ../src ../include
-          echo "=== Emscripten window creation ==="
-          sed -n '600,645p' ../src/CIrrDeviceSDL.cpp
+            -DCMAKE_C_FLAGS="-sUSE_SDL=2" \
+            -DCMAKE_CXX_FLAGS="-sUSE_SDL=2"
 
-          echo "=== SDL renderer declaration ==="
-          grep -n -B 25 -A 15 'SDL_CreateWindowAndRenderer' ../src/CIrrDeviceSDL.cpp
-          echo "=== Renderer declarations ==="
-          grep -R -n -E 'SDL_Renderer|Renderer' ../src ../include
-          
-          cmake --build . --parallel
+          cmake --build . --parallel 2>&1 | tee build.log || {
+            echo "=== FEHLER ==="
+            grep -n -E "error:|Error " build.log | head -40
+            exit 1
+          }
 
           cd ../..
           mkdir -p irrlicht/include irrlicht/lib
@@ -278,26 +189,5 @@ jobs:
           cp irrlicht-src/build/libIrrlicht.a irrlicht/lib/
 
       - name: Configure
-        run: |
-          emcmake cmake -S . -B build \
-            -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DRUN_IN_PLACE=TRUE \
-            -DBUILD_SERVER=FALSE \
-            -DENABLE_SOUND=0 \
-            -DSQLITE3_LIBRARY="$GITHUB_WORKSPACE/sqlite/lib/libsqlite3.a" \
-            -DSQLITE3_INCLUDE_DIR="$GITHUB_WORKSPACE/sqlite/include" \
-            -DJPEG_LIBRARY="$GITHUB_WORKSPACE/libjpeg/lib/libjpeg.a" \
-            -DJPEG_INCLUDE_DIR="$GITHUB_WORKSPACE/libjpeg/include" \
-            -DBZIP2_LIBRARIES="$GITHUB_WORKSPACE/bzip2/lib/libbz2.a" \
-            -DBZIP2_INCLUDE_DIR="$GITHUB_WORKSPACE/bzip2/include" \
-            -DZLIB_LIBRARY="$GITHUB_WORKSPACE/zlib/lib/libz.a" \
-            -DZLIB_INCLUDE_DIR="$GITHUB_WORKSPACE/zlib/include" \
-            -DPNG_LIBRARY="$GITHUB_WORKSPACE/libpng/lib/libpng18.a" \
-            -DPNG_PNG_INCLUDE_DIR="$GITHUB_WORKSPACE/libpng/include" \
-            -DZSTD_LIBRARY="$GITHUB_WORKSPACE/zstd/lib/libzstd.a" \
-            -DZSTD_INCLUDE_DIR="$GITHUB_WORKSPACE/zstd/include"
-
-      - name: Build
         run: |
           cmake --build build --parallel
